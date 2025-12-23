@@ -53,6 +53,7 @@ def rollout_hierarchical(
         
         # === 高层决策：每 subgoal_interval 步生成新的subgoal ===
         should_update = (step_count % subgoal_interval == 0)
+        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
 
         def update_subgoal(_):
             new_sg, log_p, new_rnn = high_level_actor(graph, rnn_state, key_)
@@ -67,10 +68,21 @@ def rollout_hierarchical(
             keep_subgoal,
             operand=None
         )
-        
+
+        # === 强制最后一个 subgoal 为最终目标 ===
+        # 计算还剩多少步
+        remaining_steps = env.max_episode_steps - step_count
+        is_last_subgoal = remaining_steps <= subgoal_interval
+
+        # 如果是最后一个 subgoal 周期，强制使用最终目标
+        new_subgoal = jnp.where(
+            is_last_subgoal,
+            real_goal,      # 最后一个周期：使用最终目标
+            new_subgoal     # 其他：使用策略生成的 subgoal
+        )
+
         # === 低层执行：使用 u_ref 跟踪当前 subgoal ===
-        # 判断当前subgoal是否接近最终目标
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        # 判断当前subgoal是否为最终目标
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
         is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
         
@@ -232,6 +244,7 @@ def test_rollout_subgoal(
 
         # === 高层决策：每 subgoal_interval 步生成新的subgoal ===
         should_update = (step_count % subgoal_interval == 0)
+        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
 
         # 使用 jax.lax.cond 替代 if/else
         def update_subgoal(_):
@@ -254,8 +267,16 @@ def test_rollout_subgoal(
             operand=None
         )
 
+        # === 强制最后一个 subgoal 为最终目标 ===
+        remaining_steps = env.max_episode_steps - step_count
+        is_last_subgoal = remaining_steps <= subgoal_interval
+        new_subgoal = jnp.where(
+            is_last_subgoal,
+            real_goal,      # 最后一个周期：使用最终目标
+            new_subgoal     # 其他：使用策略生成的 subgoal
+        )
+
         # === 低层执行：使用 u_ref 跟踪当前 subgoal ===
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
         is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
 
