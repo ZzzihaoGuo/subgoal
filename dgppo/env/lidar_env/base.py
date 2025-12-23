@@ -16,7 +16,7 @@ from ...utils.utils import merge01, jax_vmap
 from ..base import MultiAgentEnv
 from dgppo.env.obstacle import Obstacle, Rectangle
 from dgppo.env.plot import render_lidar
-from dgppo.env.utils import get_lidar, get_node_goal_rng
+from dgppo.env.utils import get_lidar, lqr, get_node_goal_rng
 
 
 class LidarEnvState(NamedTuple):
@@ -47,18 +47,36 @@ class LidarEnv(MultiAgentEnv, ABC):
         "default_area_size": 1.5,
         "dist2goal": 0.01,
         "top_k_rays": 8,
+        "m": 0.1,  # mass
     }
 
     def __init__(
             self,
             num_agents: int,
             area_size: Optional[float] = None,
-            max_step: int = 128,
+            max_step: int = 256,
             dt: float = 0.03,
             params: dict = None
     ):
         area_size = LidarEnv.PARAMS["default_area_size"] if area_size is None else area_size
         super(LidarEnv, self).__init__(num_agents, area_size, max_step, dt, params)
+        
+        ##==============================================================##
+        A = np.zeros((self.state_dim, self.state_dim), dtype=np.float32)
+        A[0, 2] = 1.0
+        A[1, 3] = 1.0
+        self._A = A * self._dt + np.eye(self.state_dim)
+        self._B = (
+            np.array([[0.0, 0.0], [0.0, 0.0], [1.0 / self._params["m"], 0.0], [0.0, 1.0 / self._params["m"]]])
+            * self._dt
+        )
+        # self._Q = np.eye(self.state_dim) * 5
+        self._Q = np.diag([15.0, 15.0, 5.0, 5.0])
+        self._R = np.eye(self.action_dim)
+        self._K = jnp.array(lqr(self._A, self._B, self._Q, self._R))
+        ##==============================================================##
+
+
         self.create_obstacles = jax_vmap(Rectangle.create)
         self.num_goals = self._num_agents
 
@@ -279,3 +297,45 @@ class LidarEnv(MultiAgentEnv, ABC):
         lower_lim = jnp.ones(2) * -1.0
         upper_lim = jnp.ones(2)
         return lower_lim, upper_lim
+    
+
+    def u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
+        agent = graph.type_states(type_idx=0, n_type=self.num_agents)
+        if target_pos is None:
+            goal = graph.type_states(type_idx=1, n_type=self.num_agents)
+        else:
+            goal_pos = target_pos
+            agent_pos = agent[:, :2]
+
+            # 计算方向和距离
+            direction = goal_pos - agent_pos
+            dist = jnp.linalg.norm(direction, axis=-1, keepdims=True)
+            direction_unit = jnp.where(dist > 1e-6, direction / dist, 0.0)
+            
+            # 根据距离和是否是最终目标，设定期望速度
+            max_vel = 0.5
+            # 中间subgoal：保持恒定速度（最大速度的50%）
+            cruise_speed = max_vel * 0.5
+            # 或者根据距离调整：远离时加速，接近时减速到巡航速度
+            approach_dist = 0.1
+            desired_speed = jnp.where(
+                dist > approach_dist,
+                max_vel * 0.7,  # 远离subgoal：70%最大速度
+                cruise_speed    # 接近subgoal：50%最大速度
+            )
+            desired_vel = direction_unit * desired_speed
+
+            # 构造目标状态 [x, y, vx, vy]
+            # 使用 jnp.where 替代 if/else
+            desired_vel = jnp.where(
+                is_final_goal,
+                jnp.zeros_like(desired_vel),  # 最终目标：速度为0
+                desired_vel                    # 中间subgoal：保持速度
+            )
+            goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
+    
+
+        error = goal - agent
+        error_max = jnp.abs(error / jnp.linalg.norm(error, axis=-1, keepdims=True) * self._params["comm_radius"])
+        error = jnp.clip(error, -error_max, error_max)
+        return self.clip_action(error @ self._K.T)

@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .data import Rollout
 from .utils import test_rollout
+from .utils import test_rollout_subgoal
 from ..env import MultiAgentEnv
 from ..algo.base import Algorithm
 
@@ -84,7 +85,7 @@ class Trainer:
 
         def test_fn_single(params, key):
             act_fn = ft.partial(self.algo.act, params=params)
-            return test_rollout(
+            return test_rollout_subgoal(
                 self.env_test,
                 act_fn,
                 init_rnn_state,
@@ -118,10 +119,17 @@ class Trainer:
                     "eval/unsafe_frac": unsafe_frac,
                 }
                 time_since_start = time() - start_time
+                # 计算稀疏奖励的统计信息
+                success_rate = np.mean(test_rollouts.rewards[:, -1] == 0.0)  # 最后一步奖励为0表示成功
+                avg_steps_to_goal = np.mean(np.where(test_rollouts.rewards == 0.0, 1, 0).sum(axis=1))  # 到达目标的步数
+
                 eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
                                 f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
-                                f'unsafe_frac: {unsafe_frac:6.2f}')
+                                f'unsafe_frac: {unsafe_frac:6.2f}, success_rate: {success_rate:6.2f}')
                 tqdm.write(eval_verbose)
+
+                # 额外记录到 wandb
+                eval_info["eval/success_rate"] = success_rate
                 wandb.log(eval_info, step=self.update_steps)
 
             # save the model

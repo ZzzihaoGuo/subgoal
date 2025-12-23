@@ -163,11 +163,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, required=True)
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/dgppo/seed0_815004720_WQPF")
 
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=5)
+    parser.add_argument("--epi", type=int, default=1)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -189,5 +189,4 @@ def main():
 
 
 if __name__ == "__main__":
-    with ipdb.launch_ipdb_on_exception():
-        main()
+    main()

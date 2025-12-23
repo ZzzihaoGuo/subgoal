@@ -210,3 +210,127 @@ class PPOPolicy(MultiAgentPolicy):
         log_pi = dist.log_prob(action)
         entropy = dist.entropy(seed=key)
         return log_pi, entropy, rnn_state
+    
+
+class SubgoalPolicy(MultiAgentPolicy):
+    """
+    输出 Subgoal 绝对坐标的 Policy
+    复用 TanhNormal，但输出后做 (tanh + 1) / 2 * area_size 变换
+    """
+    def __init__(
+            self,
+            node_dim: int,
+            edge_dim: int,
+            n_agents: int,
+            subgoal_dim: int = 2,  # [x, y]
+            area_size: float = 1.5,
+            use_rnn: bool = True,
+            rnn_layers: int = 1,
+            gnn_layers: int = 2,
+            gnn_out_dim: int = 64,
+            use_lstm: bool = False,
+    ):
+        super().__init__(node_dim, edge_dim, n_agents, subgoal_dim)
+        self.area_size = area_size
+        self.subgoal_dim = subgoal_dim
+        self.gnn_out_dim = gnn_out_dim
+        self.use_rnn = use_rnn
+        
+        # 复用 PPOPolicy 的结构
+        self.gnn = ft.partial(
+            GraphTransformerGNN,
+            msg_dim=32,
+            out_dim=gnn_out_dim,
+            n_heads=3,
+            n_layers=gnn_layers
+        )
+        self.head = ft.partial(
+            MLP,
+            hid_sizes=(64, 64),
+            act=nn.relu,
+            act_final=True,
+            name='SubgoalPolicyHead'
+        )
+        
+        if use_rnn:
+            self.rnn_base = ft.partial(nn.LSTMCell if use_lstm else nn.GRUCell, features=64)
+            self.rnn = ft.partial(RNN, rnn_cls=self.rnn_base, rnn_layers=rnn_layers)
+            self.policy_base = ft.partial(
+                PolicyNet,
+                gnn_cls=self.gnn,
+                head_cls=self.head,
+                rnn_cls=self.rnn,
+            )
+            # 复用 TanhNormal
+            self.dist = TanhNormal(base_cls=self.policy_base, _nu=subgoal_dim)
+        else:
+            self.policy_base = ft.partial(
+                PolicyNet,
+                gnn_cls=self.gnn,
+                head_cls=self.head,
+            )
+            self.dist = TanhNormal(base_cls=self.policy_base, _nu=subgoal_dim)
+
+    def initialize_carry(self, key: PRNGKey) -> Array:
+        if self.use_rnn:
+            return self.rnn_base().initialize_carry(key, (self.gnn_out_dim,))
+        else:
+            return jnp.zeros((self.gnn_out_dim,))
+
+    def _transform_to_subgoal(self, action_tanh: Array) -> Array:
+        """
+        将 tanh 输出 [-1, 1] 转换为绝对坐标 [0, area_size]
+        
+        Args:
+            action_tanh: (n_agents, 2) in [-1, 1]
+        
+        Returns:
+            subgoal: (n_agents, 2) in [0, area_size]
+        """
+        return (action_tanh + 1.0) / 2.0 * self.area_size
+
+    def _transform_from_subgoal(self, subgoal: Array) -> Array:
+        """
+        反向变换：从 [0, area_size] 到 [-1, 1]
+        用于 eval_action
+        
+        Args:
+            subgoal: (n_agents, 2) in [0, area_size]
+        
+        Returns:
+            action_tanh: (n_agents, 2) in [-1, 1]
+        """
+        return subgoal / self.area_size * 2.0 - 1.0
+
+    def get_action(self, params: Params, obs: GraphsTuple, rnn_state: Array) -> [Action, Array]:
+        """返回 subgoal: (n_agents, 2) - [x, y] 绝对坐标"""
+        dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
+        action_tanh = dist.mode()  # (n_agents, 2) in [-1, 1]
+        subgoal = self._transform_to_subgoal(action_tanh)
+        return subgoal, rnn_state
+
+    def sample_action(
+            self, params: Params, obs: GraphsTuple, rnn_state: Array, key: PRNGKey
+    ) -> Tuple[Action, Array, Array]:
+        """采样 subgoal 并计算 log_prob"""
+        dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
+        action_tanh = dist.sample(seed=key)  # (n_agents, 2) in [-1, 1]
+        log_prob = dist.log_prob(action_tanh)  # log_prob 是在 tanh 空间计算的
+        subgoal = self._transform_to_subgoal(action_tanh)
+        return subgoal, log_prob, rnn_state
+
+    def eval_action(
+            self, params: Params, obs: GraphsTuple, action: Action, rnn_state: Array, key: PRNGKey
+    ) -> Tuple[Array, Array, Array]:
+        """
+        评估给定 subgoal 的 log_prob 和 entropy
+        
+        Args:
+            action: subgoal in [0, area_size]
+        """
+        dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
+        # 将 subgoal 转回 tanh 空间
+        action_tanh = self._transform_from_subgoal(action)
+        log_prob = dist.log_prob(action_tanh)
+        entropy = dist.entropy()
+        return log_prob, entropy, rnn_state

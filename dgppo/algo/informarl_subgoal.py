@@ -19,13 +19,16 @@ from ..utils.graph import GraphsTuple
 from ..utils.utils import tree_index, jax_vmap
 from ..trainer.data import Rollout
 from ..trainer.utils import has_any_nan_or_inf, compute_norm_and_clip
-from ..trainer.utils import rollout as rollout_fn
+# from ..trainer.utils import rollout as rollout_fn
+from ..trainer.utils import rollout_hierarchical as rollout_fn
 from ..env.base import MultiAgentEnv
 from ..algo.module.value import ValueNet
 from ..algo.module.policy import PPOPolicy
+from ..algo.module.policy import SubgoalPolicy
 
 
-class InforMARL(Algorithm):
+
+class InforMARL_SUB(Algorithm):
 
     def __init__(
             self,
@@ -35,6 +38,8 @@ class InforMARL(Algorithm):
             state_dim: int,
             action_dim: int,
             n_agents: int,
+            subgoal_interval: int = 40,
+            area_size: float = 1.5,
             cost_weight: float = 0.,
             actor_gnn_layers: int = 2,
             Vl_gnn_layers: int = 2,
@@ -56,13 +61,17 @@ class InforMARL(Algorithm):
             train_steps: int = 1e5,
             **kwargs
     ):
-        super(InforMARL, self).__init__(
+        super(InforMARL_SUB, self).__init__(
             env=env,
             node_dim=node_dim,
             edge_dim=edge_dim,
             action_dim=action_dim,
             n_agents=n_agents
         )
+
+        # 保存新参数
+        self.subgoal_interval = subgoal_interval
+        self.area_size = area_size
 
         # set hyperparameters
         self.cost_weight = cost_weight
@@ -98,12 +107,13 @@ class InforMARL(Algorithm):
         )
         self.nominal_graph = nominal_graph
 
-        # set up PPO policy
-        self.policy = PPOPolicy(
+        # set up Subgoal policy
+        self.policy = SubgoalPolicy(
             node_dim=self.node_dim,
             edge_dim=self.edge_dim,
             n_agents=self.n_agents,
-            action_dim=self.action_dim,
+            subgoal_dim=self.action_dim,
+            area_size=self.area_size,
             use_rnn=self.use_rnn,
             rnn_layers=self.rnn_layers,
             gnn_layers=self.actor_gnn_layers,
@@ -178,7 +188,8 @@ class InforMARL(Algorithm):
             return rollout_fn(self._env,
                               ft.partial(self.step, params=cur_params),
                               self.init_rnn_state,
-                              cur_key)
+                              cur_key,
+                              subgoal_interval=self.subgoal_interval)
 
         def rollout_fn_(cur_params, cur_keys):
             return jax.vmap(ft.partial(rollout_fn_single_, cur_params))(cur_keys)
@@ -200,6 +211,8 @@ class InforMARL(Algorithm):
     @property
     def config(self) -> dict:
         return {
+            'subgoal_interval': self.subgoal_interval,
+            'area_size': self.area_size,
             'cost_weight': self.cost_weight,
             'actor_gnn_layers': self.actor_gnn_layers,
             'Vl_gnn_layers': self.Vl_gnn_layers,
@@ -264,13 +277,22 @@ class InforMARL(Algorithm):
         rollout = rollout._replace(graph=graph_clean, next_graph=next_graph_clean)
 
         update_info = {}
-        assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
+        # 计算高层步骤数
+        n_high_level_steps = rollout.dones.shape[1]  # T//40
+
+        # assert rollout.dones.shape[0] * rollout.dones.shape[1] >= self.batch_size
+        assert rollout.dones.shape[0] * n_high_level_steps >= self.batch_size, \
+            f"Not enough data: {rollout.dones.shape[0]} * {n_high_level_steps} < {self.batch_size}"
+        
         for i_epoch in range(self.epoch_ppo):
             idx = np.arange(rollout.dones.shape[0])
             np.random.shuffle(idx)
-            rnn_chunk_ids = jnp.arange(rollout.dones.shape[1])
-            rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, rollout.dones.shape[1] // self.rnn_step))
-            batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // rollout.dones.shape[1])))
+            # rnn_chunk_ids = jnp.arange(rollout.dones.shape[1])
+            rnn_chunk_ids = jnp.arange(n_high_level_steps)
+            # rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, rollout.dones.shape[1] // self.rnn_step))
+            rnn_chunk_ids = jnp.array(jnp.array_split(rnn_chunk_ids, n_high_level_steps // self.rnn_step))
+            # batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // rollout.dones.shape[1])))
+            batch_idx = jnp.array(jnp.array_split(idx, idx.shape[0] // (self.batch_size // n_high_level_steps)))
             Vl_train_state, policy_train_state, update_info = self.update_inner(
                 self.Vl_train_state, self.policy_train_state, rollout, batch_idx, rnn_chunk_ids, jnp.array(step)
             )

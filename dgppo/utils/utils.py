@@ -146,6 +146,9 @@ class CustomTimeElapsedColumn(ProgressColumn):
 
 
 def save_anim(ani: FuncAnimation, path: pathlib.Path):
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+    
     pbar = Progress(*Progress.get_default_columns(), CustomTimeElapsedColumn())
     pbar.start()
     if hasattr(ani, "save_count"):
@@ -157,7 +160,21 @@ def save_anim(ani: FuncAnimation, path: pathlib.Path):
     def progress_callback(curr_frame: int, total_frames: int):
         pbar.update(task, advance=1)
 
-    ani.save(path, progress_callback=progress_callback)
+    # Try to use ffmpeg writer, fallback to pillow with .gif extension if it fails
+    try:
+        Writer = animation.writers['ffmpeg']
+        writer = Writer(fps=15, metadata=dict(artist='DGPPO'), bitrate=1800)
+        ani.save(path, writer=writer, progress_callback=progress_callback)
+    except (KeyError, RuntimeError) as e:
+        print(f"FFmpeg writer failed: {e}")
+        print("Falling back to PIL writer with .gif extension")
+        # Change extension to .gif for PIL writer
+        gif_path = path.with_suffix('.gif')
+        Writer = animation.writers['pillow']
+        writer = Writer(fps=15, metadata=dict(artist='DGPPO'))
+        ani.save(gif_path, writer=writer, progress_callback=progress_callback)
+        print(f"Saved video as: {gif_path}")
+    
     pbar.stop()
 
 

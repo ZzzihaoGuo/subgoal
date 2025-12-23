@@ -1,5 +1,6 @@
 import argparse
 import datetime
+from html import parser
 import os
 import ipdb
 import numpy as np
@@ -49,6 +50,9 @@ def train(args):
         state_dim=env.state_dim,
         action_dim=env.action_dim,
         n_agents=env.num_agents,
+        area_size=env.area_size,
+
+        subgoal_interval=args.subgoal_interval,
         cost_weight=args.cost_weight,
         cbf_weight=args.cbf_weight,
         actor_gnn_layers=args.actor_gnn_layers,
@@ -134,10 +138,12 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, required=True)
-    parser.add_argument("-n", "--num-agents", type=int, required=True)
-    parser.add_argument("--algo", type=str, required=True)
-    parser.add_argument("--obs", type=int, required=True)
+    parser.add_argument("--env", type=str, default="LidarSpread")
+    parser.add_argument("-n", "--num-agents", type=int, default=3)
+    parser.add_argument("--algo", type=str, default="informarl_subgoal")
+    parser.add_argument("--obs", type=int, default=2)
+
+
 
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)
@@ -167,20 +173,23 @@ def main():
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--use-lstm", action="store_true", default=False)
     parser.add_argument("--coef-ent", type=float, default=1e-2)
-    parser.add_argument("--rnn-step", type=int, default=16)
+    parser.add_argument("--rnn-step", type=int, default=1)
 
     # default arguments
     parser.add_argument("--n-env-train", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=16384)
+    parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=50)
     parser.add_argument("--eval-epi", type=int, default=1)
     parser.add_argument("--save-interval", type=int, default=50)
 
+    parser.add_argument("--subgoal-interval", type=int, default=40,
+                    help="Hierarchical RL: steps between subgoal generation")
+
     args = parser.parse_args()
     train(args)
 
 
 if __name__ == "__main__":
-        main()
+    main()

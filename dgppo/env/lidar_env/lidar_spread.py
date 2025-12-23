@@ -19,13 +19,14 @@ class LidarSpread(LidarEnv):
         "default_area_size": 1.5,
         "dist2goal": 0.01,
         "top_k_rays": 8,
+        "m": 0.1,  # mass
     }
 
     def __init__(
             self,
             num_agents: int,
             area_size: Optional[float] = None,
-            max_step: int = 128,
+            max_step: int = 256,
             dt: float = 0.03,
             params: dict = None
     ):
