@@ -84,10 +84,10 @@ def rollout_hierarchical(
         # === 低层执行：使用 u_ref 跟踪当前 subgoal ===
         # 判断当前subgoal是否为最终目标
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
-        is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
+        # is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
         
         # 调用u_ref跟踪subgoal
-        action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_final_goal)
+        action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
         
         # 环境交互
         next_graph, reward, cost, done, info = env.step(graph, action)
@@ -278,10 +278,10 @@ def test_rollout_subgoal(
 
         # === 低层执行：使用 u_ref 跟踪当前 subgoal ===
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
-        is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
+        # is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
 
         # 调用u_ref跟踪subgoal
-        action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_final_goal)
+        action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
 
         # 环境交互
         next_graph, reward, cost, done, info = env.step(graph, action)
