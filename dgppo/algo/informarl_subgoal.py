@@ -345,12 +345,20 @@ class InforMARL_SUB(Algorithm):
         # calculate GAE
         cost_weight = self.cost_schedule_fn(step)
         bTp1ah_Vh = bTp1_Vl[:, :, None, None].repeat(self.n_agents, axis=-2).repeat(rollout.costs.shape[-1], axis=-1)
+        # bTah_Qh, bT_Ql = jax.vmap(
+        #     ft.partial(compute_dec_ocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
+        # )(Tah_hs=rollout.costs,
+        #   T_l=-rollout.rewards + cost_weight * jnp.maximum(rollout.costs, 0.0).sum(axis=-1).sum(axis=-1),
+        #   Tp1ah_Vh=bTp1ah_Vh,
+        #   Tp1_Vl=bTp1_Vl)
+
         bTah_Qh, bT_Ql = jax.vmap(
             ft.partial(compute_dec_ocp_gae, disc_gamma=self.gamma, gae_lambda=self.gae_lambda)
         )(Tah_hs=rollout.costs,
-          T_l=-rollout.rewards + cost_weight * jnp.maximum(rollout.costs, 0.0).sum(axis=-1).sum(axis=-1),
+          T_l=-rollout.sparse_rewards + 0 * jnp.maximum(rollout.costs, 0.0).sum(axis=-1).sum(axis=-1),
           Tp1ah_Vh=bTp1ah_Vh,
           Tp1_Vl=bTp1_Vl)
+        
         assert bTah_Qh.shape == (b, T, a, self._env.n_cost)
         assert bT_Ql.shape == (b, T)
         bT_Al = bT_Ql - bT_Vl
