@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is the JAX-based implementation of DGPPO (Discrete GCBF Proximal Policy Optimization) - a multi-agent reinforcement learning algorithm for safe optimal control. The repository contains implementations of multiple algorithms, environments across different simulation engines, and comprehensive training/testing infrastructure.
+This is the JAX-based implementation of DGPPO (Discrete GCBF Proximal Policy Optimization) - a multi-agent reinforcement learning algorithm for safe optimal control (ICLR 2025). The repository contains implementations of multiple algorithms, environments across different simulation engines, and comprehensive training/testing infrastructure.
 
 ## Project Structure
 
@@ -13,17 +13,20 @@ dgppo/
 ├── dgppo/                 # Main package
 │   ├── algo/             # Algorithm implementations
 │   │   ├── dgppo.py      # Main DGPPO algorithm
-│   │   ├── informarl.py  # InforMARL baseline
+│   │   ├── informarl.py  # InforMARL baseline (MAPPO + GNN)
+│   │   ├── informarl_lagr.py    # Lagrangian-constrained variant
+│   │   ├── informarl_subgoal.py # Hierarchical subgoal variant
 │   │   ├── hcbfcrpo.py   # Hand-crafted CBF variant
 │   │   └── module/       # Neural network modules (policy, value, distribution)
 │   ├── env/              # Environment implementations
 │   │   ├── mpe/          # Multi-Agent Particle Environment
 │   │   ├── lidar_env/    # LiDAR-based environments
-│   │   └── vmas/         # Vectorized Multi-Agent Simulator
+│   │   └── vmas/         # Vectorized Multi-Agent Simulator (with physax engine)
 │   ├── nn/               # Neural network architectures (GNN, MLP, RNN)
 │   ├── trainer/          # Training infrastructure
 │   └── utils/            # Utilities (graph operations, typing)
 ├── train.py              # Main training script
+├── train_try_1.py        # Training script with subgoal support
 ├── test.py               # Model evaluation and video generation
 └── media/                # Environment visualizations and videos
 ```
@@ -43,6 +46,9 @@ python train.py --env VMASWheel --algo hcbfcrpo -n 4 --obs 0 --debug
 
 # Full observation mode (for MPE/LidarEnv)
 python train.py --env MPEFormation --algo dgppo -n 6 --obs 3 --full-observation
+
+# Hierarchical subgoal training (use train_try_1.py)
+python train_try_1.py --env LidarSpread --algo informarl_subgoal -n 3 --obs 2 --subgoal-interval 40
 ```
 
 ### Evaluation
@@ -84,10 +90,11 @@ The project requires JAX with CUDA support. Key environment variables:
 ## Algorithm Architecture
 
 ### Core Algorithms
-- **DGPPO**: Main algorithm with learned discrete GCBF constraints
-- **InforMARL**: MAPPO baseline with GNN message passing
-- **InforMARLLagr**: Lagrangian-constrained variant with max-over-time cost
-- **HCBFCRPO**: Hand-crafted CBF variant for comparison
+- **DGPPO** (`dgppo`): Main algorithm with learned discrete GCBF constraints
+- **InforMARL** (`informarl`): MAPPO baseline with GNN message passing
+- **InforMARLLagr** (`informarl_lagr`): Lagrangian-constrained variant with max-over-time cost
+- **InforMARL_SUB** (`informarl_subgoal`): Hierarchical subgoal variant with LQR tracking
+- **HCBFCRPO** (`hcbfcrpo`): Hand-crafted CBF variant for comparison
 
 ### Neural Network Components
 - **GNN-based policies**: Graph neural networks for multi-agent coordination
@@ -116,7 +123,7 @@ The project requires JAX with CUDA support. Key environment variables:
 
 ### Required Arguments
 - `--env`: Environment name (e.g., LidarSpread, MPETarget, VMASWheel)
-- `--algo`: Algorithm (dgppo, informarl, informarl_lagr, hcbfcrpo)
+- `--algo`: Algorithm (dgppo, informarl, informarl_lagr, informarl_subgoal, hcbfcrpo)
 - `-n`: Number of agents
 - `--obs`: Number of obstacles
 
@@ -125,6 +132,7 @@ The project requires JAX with CUDA support. Key environment variables:
 - `--cbf-eps`: CBF constraint tolerance (default: 0.01)
 - `--alpha`: Class-κ function parameter (default: 10.0)
 - `--clip-eps`: PPO clipping parameter (default: 0.25)
+- `--subgoal-interval`: Steps between subgoal generation for hierarchical RL (default: 40)
 - Learning rates: `--lr-actor` (3e-4), `--lr-Vl` (1e-3), `--lr-Vh` (1e-3)
 
 ### Performance Tuning
@@ -165,3 +173,6 @@ The project requires JAX with CUDA support. Key environment variables:
 - Use `--debug` flag to disable logging and JIT compilation
 - `ipdb.launch_ipdb_on_exception()` wrapper in main scripts
 - Rich logging for training progress visualization
+
+### Custom Environments
+To create a custom environment: inherit from an existing environment class in one of the three engines, define your reward function, graph connection, and dynamics, then register the new environment in `dgppo/env/__init__.py`.

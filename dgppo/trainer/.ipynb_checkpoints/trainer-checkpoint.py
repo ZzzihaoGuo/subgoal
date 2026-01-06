@@ -106,40 +106,30 @@ class Trainer:
             if step % self.eval_interval == 0:
                 eval_info = {}
                 test_rollouts: Rollout = test_fn(self.algo.params, test_keys)
-
-                # 环境reward统计
                 total_reward = test_rollouts.rewards.sum(axis=-1)
                 reward_min, reward_max = total_reward.min(), total_reward.max()
                 reward_mean = np.mean(total_reward)
                 reward_final = np.mean(test_rollouts.rewards[:, -1])
-
-                # sparse_rewards统计
-                total_sparse_reward = test_rollouts.sparse_rewards.sum(axis=-1)
-                sparse_reward_mean = np.mean(total_sparse_reward)
-                sparse_reward_final = np.mean(test_rollouts.sparse_rewards[:, -1])
-
                 cost = jnp.maximum(test_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
                 unsafe_frac = np.mean(test_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
-
-                # 计算稀疏奖励的统计信息
-                success_rate = np.mean(test_rollouts.sparse_rewards[:, -1] == 0.0)  # 最后一步稀疏奖励为0表示成功
-
                 eval_info = eval_info | {
                     "eval/reward": reward_mean,
                     "eval/reward_final": reward_final,
-                    "eval/sparse_reward": sparse_reward_mean,
-                    "eval/sparse_reward_final": sparse_reward_final,
                     "eval/cost": cost,
                     "eval/unsafe_frac": unsafe_frac,
-                    "eval/success_rate": success_rate,
                 }
                 time_since_start = time() - start_time
+                # 计算稀疏奖励的统计信息
+                success_rate = np.mean(test_rollouts.rewards[:, -1] == 0.0)  # 最后一步奖励为0表示成功
+                avg_steps_to_goal = np.mean(np.where(test_rollouts.rewards == 0.0, 1, 0).sum(axis=1))  # 到达目标的步数
 
-                eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, '
-                                f'reward: {reward_mean:9.4f}, sparse_reward: {sparse_reward_mean:9.4f}, '
-                                f'cost: {cost:8.4f}, unsafe_frac: {unsafe_frac:6.2f}, success_rate: {success_rate:6.2f}')
+                eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
+                                f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
+                                f'unsafe_frac: {unsafe_frac:6.2f}, success_rate: {success_rate:6.2f}')
                 tqdm.write(eval_verbose)
 
+                # 额外记录到 wandb
+                eval_info["eval/success_rate"] = success_rate
                 wandb.log(eval_info, step=self.update_steps)
 
             # save the model

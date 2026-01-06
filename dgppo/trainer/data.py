@@ -14,6 +14,7 @@ class Rollout(NamedTuple):
     dones: Done
     log_pis: Optional[Array]
     next_graph: GraphsTuple
+    sparse_rewards: Optional[Reward] = None  # 自定义的稀疏奖励
 
     @property
     def length(self) -> int:
