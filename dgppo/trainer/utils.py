@@ -298,11 +298,15 @@ def test_rollout_subgoal(
         next_graph, reward, cost, done, info = env.step(graph, action)
 
         # === 计算稀疏奖励（与训练时一致）===
-        agent_pos = next_graph.type_states(type_idx=0, n_type=env.num_agents)[:, :2]
-        goal_pos = real_goal
-        dist_to_goal = jnp.linalg.norm(agent_pos - goal_pos, axis=-1)
-        reached_goal = (dist_to_goal < env.params.get("dist2goal", 0.1)).all()
-        sparse_reward = jnp.where(reached_goal, 0.0, -1.0)
+        agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
+        goals = real_goal
+
+        # each goal finds the nearest agent
+        agent_pos = agent_states[:, :2]
+        goal_pos = goals[:, :2]
+        dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
+
+        sparse_reward = jnp.where(dist2goal < 0.01, 0.0, -1.0).mean()
 
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1), (
             graph,
