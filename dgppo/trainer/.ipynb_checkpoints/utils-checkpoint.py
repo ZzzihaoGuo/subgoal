@@ -93,11 +93,20 @@ def rollout_hierarchical(
         next_graph, reward, cost, done, info = env.step(graph, action)
         
         # === 稀疏奖励：只在达到最终目标时给0，其他时候给-1 ===
-        agent_pos = next_graph.type_states(type_idx=0, n_type=env.num_agents)[:, :2]
-        goal_pos = real_goal
-        dist_to_goal = jnp.linalg.norm(agent_pos - goal_pos, axis=-1)
-        reached_goal = (dist_to_goal < env.params.get("dist2goal", 0.1)).all()
-        sparse_reward = jnp.where(reached_goal, 0.0, -1.0)
+        # agent_pos = next_graph.type_states(type_idx=0, n_type=env.num_agents)[:, :2]
+        # goal_pos = real_goal
+        # dist_to_goal = jnp.linalg.norm(agent_pos - goal_pos, axis=-1)
+        agent_states = graph.type_states(type_idx=0, n_type=env.num_agents)
+        goals = real_goal
+
+        # each goal finds the nearest agent
+        agent_pos = agent_states[:, :2]
+        goal_pos = goals[:, :2]
+        dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
+
+        # jnp.where(dist2goal > 0.01, 1.0, 0.0).mean()
+        # reached_goal = (dist2goal < env.params.get("dist2goal", 0.01)).all()
+        sparse_reward = jnp.where(dist2goal < 0.1, 0.0, -1.0).mean()
         
         # === 只在高层决策点保存数据 ===
         # 用一个mask标记哪些timestep需要保存
@@ -107,31 +116,32 @@ def rollout_hierarchical(
             graph,
             new_subgoal,  # 保存subgoal而不是action
             rnn_state,
-            sparse_reward,
+            reward,  # 环境reward
             cost,
             done,
             log_pi,
             next_graph,
-            save_data  # 额外的标记
+            save_data,  # 额外的标记
+            sparse_reward,  # 自定义的稀疏reward
         )
-    
+
     # 执行rollout
     keys = jax.random.split(key, env.max_episode_steps)
     init_data = (init_graph, init_rnn_state, init_subgoal, 0)
-    
+
     _, outputs = jax.lax.scan(body_, init_data, keys, length=env.max_episode_steps)
-    
-    graphs, subgoals, rnn_states, rewards, costs, dones, log_pis, next_graphs, save_mask = outputs
-    
+
+    graphs, subgoals, rnn_states, rewards, costs, dones, log_pis, next_graphs, save_mask, sparse_rewards = outputs
+
     # === 筛选出高层决策点的数据 ===
     # save_mask: (T,) bool array，标记哪些timestep是高层决策点
     # 我们需要reshape成 (T//subgoal_interval, subgoal_interval) 然后取第一列
-    
+
     n_high_level_steps = env.max_episode_steps // subgoal_interval
-    
+
     # 简单方法：直接索引
     high_level_indices = jnp.arange(0, env.max_episode_steps, subgoal_interval)
-    
+
     rollout_data = Rollout(
         graph=jax.tree.map(lambda x: x[high_level_indices], graphs),
         actions=subgoals[high_level_indices],  # 注意这里是subgoal，不是低层action
@@ -141,8 +151,9 @@ def rollout_hierarchical(
         dones=dones[high_level_indices],
         log_pis=log_pis[high_level_indices],
         next_graph=jax.tree.map(lambda x: x[high_level_indices], next_graphs),
+        sparse_rewards=sparse_rewards[high_level_indices],
     )
-    
+
     return rollout_data
 
 def rollout(
@@ -287,47 +298,38 @@ def test_rollout_subgoal(
         next_graph, reward, cost, done, info = env.step(graph, action)
 
         # === 计算稀疏奖励（与训练时一致）===
-        agent_pos = next_graph.type_states(type_idx=0, n_type=env.num_agents)[:, :2]
-        goal_pos = real_goal
-        dist_to_goal = jnp.linalg.norm(agent_pos - goal_pos, axis=-1)
-        reached_goal = (dist_to_goal < env.params.get("dist2goal", 0.1)).all()
-        sparse_reward = jnp.where(reached_goal, 0.0, -1.0)
+        agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
+        goals = real_goal
+
+        # each goal finds the nearest agent
+        agent_pos = agent_states[:, :2]
+        goal_pos = goals[:, :2]
+        dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
+
+        sparse_reward = jnp.where(dist2goal < 0.1, 0.0, -1.0).mean()
 
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1), (
             graph,
             new_subgoal,  # 保存subgoal而不是低层action
             rnn_state,
-            sparse_reward,  # 使用稀疏reward而不是环境reward
+            reward,  # 环境reward
             cost,
             done,
             None,  # log_pi
-            next_graph
+            next_graph,
+            sparse_reward,  # 自定义的稀疏reward
         )
 
     keys = jax.random.split(key, env.max_episode_steps)
     init_data = (init_graph, init_rnn_state, init_subgoal, 0)
 
-    _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs) = (
+    _, (graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs, sparse_rewards) = (
         jax.lax.scan(body_,
                      init_data,
                      keys,
                      length=env.max_episode_steps))
 
-    # # === 筛选出高层决策点的数据（与训练时一致）===
-    # high_level_indices = jnp.arange(0, env.max_episode_steps, subgoal_interval)
-
-    # rollout_data = Rollout(
-    #     graphs=graphs,
-    #     actions=actions, #=actions[high_level_indices],
-    #     rnn_states=jax.tree.map(lambda x: x[high_level_indices], actor_rnn_states),
-    #     rewards=rewards[high_level_indices],  # Shape: (128,) -> (3,)
-    #     costs=costs[high_level_indices],
-    #     dones=dones[high_level_indices],
-    #     log_pis=log_pis[high_level_indices] if log_pis is not None else None,
-    #     next_graph=jax.tree.map(lambda x: x[high_level_indices], next_graphs),
-    # )
-
-    rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs)
+    rollout_data = Rollout(graphs, actions, actor_rnn_states, rewards, costs, dones, log_pis, next_graphs, sparse_rewards)
 
     return rollout_data
 

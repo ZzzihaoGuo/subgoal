@@ -106,7 +106,7 @@ def rollout_hierarchical(
 
         # jnp.where(dist2goal > 0.01, 1.0, 0.0).mean()
         # reached_goal = (dist2goal < env.params.get("dist2goal", 0.01)).all()
-        sparse_reward = jnp.where(dist2goal < 0.01, 0.0, -1.0).mean()
+        sparse_reward = jnp.where(dist2goal < 0.1, 0.0, -1.0).mean()
         
         # === 只在高层决策点保存数据 ===
         # 用一个mask标记哪些timestep需要保存
@@ -306,7 +306,7 @@ def test_rollout_subgoal(
         goal_pos = goals[:, :2]
         dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
 
-        sparse_reward = jnp.where(dist2goal < 0.01, 0.0, -1.0).mean()
+        sparse_reward = jnp.where(dist2goal < 0.1, 0.0, -1.0).mean()
 
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1), (
             graph,

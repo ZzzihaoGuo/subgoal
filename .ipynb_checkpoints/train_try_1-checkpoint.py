@@ -177,14 +177,14 @@ def main():
 
     # default arguments
     parser.add_argument("--n-env-train", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--batch-size", type=int, default=128*7)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=50)
     parser.add_argument("--eval-epi", type=int, default=1)
     parser.add_argument("--save-interval", type=int, default=50)
 
-    parser.add_argument("--subgoal-interval", type=int, default=70,
+    parser.add_argument("--subgoal-interval", type=int, default=20,
                     help="Hierarchical RL: steps between subgoal generation")
 
     args = parser.parse_args()
