@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from .data import Rollout
 from .utils import test_rollout
+from .utils import test_rollout_subgoal
 from ..env import MultiAgentEnv
 from ..algo.base import Algorithm
 
@@ -82,16 +83,24 @@ class Trainer:
         # preprocess the rollout function
         init_rnn_state = self.algo.init_rnn_state
 
-        def test_fn_single(params, key):
+        # get subgoal_interval from algo config if available
+        subgoal_interval = getattr(self.algo, 'subgoal_interval', 40)
+
+        def test_fn_single(params, key, reach_thresh):
             act_fn = ft.partial(self.algo.act, params=params)
-            return test_rollout(
+            return test_rollout_subgoal(
                 self.env_test,
                 act_fn,
                 init_rnn_state,
-                key
+                key,
+                subgoal_interval=subgoal_interval,
+                filter_high_level=True,  # 训练统计时只用高层决策点数据
+                reach_thresh=reach_thresh,
             )
 
-        test_fn = lambda params, keys: jax.vmap(ft.partial(test_fn_single, params))(keys)
+        def test_fn(params, keys, reach_thresh):
+            return jax.vmap(ft.partial(test_fn_single, params, reach_thresh=reach_thresh))(keys)
+
         test_fn = jax.jit(test_fn)
 
         # start training
@@ -104,51 +113,55 @@ class Trainer:
             # evaluate the algorithm
             if step % self.eval_interval == 0:
                 eval_info = {}
-                test_rollouts: Rollout = test_fn(self.algo.params, test_keys)
+                # 获取当前的 reach_thresh
+                reach_thresh = getattr(self.algo, 'reach_thresh_schedule_fn', lambda x: 0.1)(step)
+                test_rollouts: Rollout = test_fn(self.algo.params, test_keys, reach_thresh)
+
+                # 环境reward统计
                 total_reward = test_rollouts.rewards.sum(axis=-1)
                 reward_min, reward_max = total_reward.min(), total_reward.max()
                 reward_mean = np.mean(total_reward)
                 reward_final = np.mean(test_rollouts.rewards[:, -1])
+
+                # sparse_rewards统计
+                total_sparse_reward = test_rollouts.sparse_rewards.sum(axis=-1)
+                sparse_reward_mean = np.mean(total_sparse_reward)
+                sparse_reward_final = np.mean(test_rollouts.sparse_rewards[:, -1])
+
                 cost = jnp.maximum(test_rollouts.costs, 0.0).max(axis=-1).max(axis=-1).sum(axis=-1).mean()
                 unsafe_frac = np.mean(test_rollouts.costs.max(axis=-1).max(axis=-2) >= 1e-6)
 
-                # 计算 success_rate: 最后一帧 agent 是否到达 goal
-                # test_rollouts.graph.states: (n_env, T, n_nodes, state_dim)
-                # 取最后一帧
-                final_states = test_rollouts.graph.states[:, -1]  # (n_env, n_nodes, state_dim)
-                n_agents = self.env_test.num_agents
-                n_goals = self.env_test.num_agents  # 假设 n_goals == n_agents
-                agent_pos = final_states[:, :n_agents, :2]  # (n_env, n_agent, 2)
-                goal_pos = final_states[:, n_agents:n_agents+n_goals, :2]  # (n_env, n_goal, 2)
-                # 计算每个 agent 到最近 goal 的距离
-                dist2goal = jnp.linalg.norm(
-                    jnp.expand_dims(goal_pos, 2) - jnp.expand_dims(agent_pos, 1), axis=-1
-                ).min(axis=1)  # (n_env, n_agent)
-                # 所有 agent 都到达目标才算成功
-                success_rate = np.mean(dist2goal.max(axis=-1) < 0.01)
+                # 计算最终距离：最后一步每个goal到最近agent的平均距离
+                final_dist2goal = np.mean(test_rollouts.dist2goal[:, -1])
 
                 eval_info = eval_info | {
                     "eval/reward": reward_mean,
                     "eval/reward_final": reward_final,
+                    "eval/sparse_reward": sparse_reward_mean,
+                    "eval/sparse_reward_final": sparse_reward_final,
                     "eval/cost": cost,
                     "eval/unsafe_frac": unsafe_frac,
-                    "eval/success_rate": success_rate,
+                    "eval/final_dist2goal": final_dist2goal,
+                    "eval/reach_thresh": reach_thresh,
                 }
                 time_since_start = time() - start_time
-                eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, reward: {reward_mean:9.4f}, '
-                                f'min/max reward: {reward_min:7.2f}/{reward_max:7.2f}, cost: {cost:8.4f}, '
-                                f'unsafe_frac: {unsafe_frac:6.2f}, success_rate: {success_rate:6.2f}')
+
+                eval_verbose = (f'step: {step:3}, time: {time_since_start:5.0f}s, '
+                                f'reward: {reward_mean:9.4f}, sparse_reward: {sparse_reward_mean:9.4f}, '
+                                f'cost: {cost:8.4f}, unsafe_frac: {unsafe_frac:6.2f}, final_dist: {final_dist2goal:6.4f}, '
+                                f'reach_thresh: {reach_thresh:.3f}')
                 tqdm.write(eval_verbose)
+
                 wandb.log(eval_info, step=self.update_steps)
 
             # save the model
             if self.save_log and step % self.save_interval == 0:
                 self.algo.save(os.path.join(self.model_dir), step)
 
-            # collect rollouts
+            # collect rollouts (传入 step 用于动态调整 reach_thresh)
             key_x0, self.key = jax.random.split(self.key)
             key_x0 = jax.random.split(key_x0, self.n_env_train)
-            rollouts = self.algo.collect(self.algo.params, key_x0)
+            rollouts = self.algo.collect(self.algo.params, key_x0, step=step)
 
             # update the algorithm
             update_info = self.algo.update(rollouts, step)

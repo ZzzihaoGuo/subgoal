@@ -12,7 +12,8 @@ class LidarSpread(LidarEnv):
 
     PARAMS = {
         "car_radius": 0.05,
-        "comm_radius": 0.5,
+        "comm_radius": 0.5,           # GNN 图结构的通信半径（保持正常）
+        "cbf_comm_radius": 100.0,     # CBF 的局部感知半径（可单独设置，None 表示全局感知）
         "n_rays": 32,
         "obs_len_range": [0.1, 0.3],
         "n_obs": 3,
@@ -28,10 +29,11 @@ class LidarSpread(LidarEnv):
             area_size: Optional[float] = None,
             max_step: int = 256,
             dt: float = 0.03,
-            params: dict = None
+            params: dict = None,
+            cbf_alpha: float = 10.0
     ):
         area_size = LidarSpread.PARAMS["default_area_size"] if area_size is None else area_size
-        super(LidarSpread, self).__init__(num_agents, area_size, max_step, dt, params)
+        super(LidarSpread, self).__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
 
     def get_reward(self, graph: LidarEnvGraphsTuple, action: Action) -> Reward:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)

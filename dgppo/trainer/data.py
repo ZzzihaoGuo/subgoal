@@ -15,6 +15,7 @@ class Rollout(NamedTuple):
     log_pis: Optional[Array]
     next_graph: GraphsTuple
     sparse_rewards: Optional[Reward] = None  # 自定义的稀疏奖励
+    dist2goal: Optional[Array] = None  # 每个goal到最近agent的距离
 
     @property
     def length(self) -> int:

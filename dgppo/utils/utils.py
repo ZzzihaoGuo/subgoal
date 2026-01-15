@@ -222,3 +222,8 @@ def assert_shape(arr: _Arr, shape: int | Shape, label: str | None = None) -> _Ar
 def tree_where(cond: BoolScalar | bool, true_val: _PyTree, false_val: _PyTree) -> _PyTree:
     return jtu.tree_map(lambda x, y: jnp.where(cond, x, y), true_val, false_val)
 
+
+def mask2index(mask: jnp.ndarray, n_true: int) -> jnp.ndarray:
+    idx = lax.top_k(mask, n_true)[1]
+    return idx
+

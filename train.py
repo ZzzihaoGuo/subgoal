@@ -134,10 +134,10 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, required=True)
-    parser.add_argument("-n", "--num-agents", type=int, required=True)
-    parser.add_argument("--algo", type=str, required=True)
-    parser.add_argument("--obs", type=int, required=True)
+    parser.add_argument("--env", type=str, default="LidarSpread")
+    parser.add_argument("-n", "--num-agents", type=int, default=3)
+    parser.add_argument("--algo", type=str, default="dgppo")
+    parser.add_argument("--obs", type=int, default=3)
 
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)

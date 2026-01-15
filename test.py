@@ -3,6 +3,14 @@ import datetime
 import functools as ft
 import os
 import pathlib
+import logging
+
+# 抑制 matplotlib 字体警告
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+
+# 抑制 jaxproxqp 的 debug 输出
+from loguru import logger
+logger.disable("jaxproxqp")
 
 import ipdb
 import jax
@@ -13,7 +21,7 @@ import yaml
 
 from dgppo.algo import make_algo
 from dgppo.env import make_env
-from dgppo.trainer.utils import test_rollout
+from dgppo.trainer.utils import test_rollout, test_rollout_subgoal
 from dgppo.utils.graph import GraphsTuple
 from dgppo.utils.utils import jax_jit_np, jax_vmap
 from dgppo.utils.typing import Array
@@ -87,17 +95,41 @@ def test(args):
     act_fn = jax.jit(act_fn)
     init_rnn_state = algo.init_rnn_state
 
+    # 初始化 CBF 并预热（触发 JIT 编译）
+    if args.show_subgoal or config.algo == 'informarl_subgoal':
+        import time
+        env.init_cbf()
+
+        # Warmup: 触发首次 JIT 编译
+        print("Warming up CBF (JIT compiling)...")
+        warmup_key = jr.PRNGKey(9999)
+        warmup_graph = env.reset(warmup_key)
+        target_pos = warmup_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+
+        start = time.time()
+        _ = env.safe_u_ref(warmup_graph, target_pos=target_pos, is_final_goal=False)
+        print(f"CBF warmup complete ({time.time() - start:.2f}s)")
+
     # set up keys
     test_key = jr.PRNGKey(args.seed)
     test_keys = jr.split(test_key, 1_000)[: args.epi]
     test_keys = test_keys[args.offset:]
 
     # create rollout function
-    rollout_fn = ft.partial(test_rollout,
-                            env,
-                            act_fn,
-                            init_rnn_state,
-                            stochastic=args.stochastic)
+    if args.show_subgoal or config.algo == 'informarl_subgoal':
+        # Use subgoal rollout for hierarchical RL
+        rollout_fn = ft.partial(test_rollout_subgoal,
+                                env,
+                                act_fn,
+                                init_rnn_state,
+                                stochastic=args.stochastic,
+                                subgoal_interval=args.subgoal_interval)
+    else:
+        rollout_fn = ft.partial(test_rollout,
+                                env,
+                                act_fn,
+                                init_rnn_state,
+                                stochastic=args.stochastic)
     rollout_fn = jax_jit_np(rollout_fn)
 
     def unsafe_mask(graph_: GraphsTuple) -> Array:
@@ -112,6 +144,8 @@ def test(args):
     rollouts = []
     is_unsafes = []
     rates = []
+    last_rewards = []
+    last_dists = []
 
     # test
     for i_epi in range(args.epi):
@@ -121,11 +155,16 @@ def test(args):
 
         epi_reward = rollout.rewards.sum()
         epi_cost = rollout.costs.max()
+        last_reward = rollout.rewards[-1]
+        last_dist = rollout.dist2goal[-1].mean() if rollout.dist2goal is not None else 0.0
         rewards.append(epi_reward)
         costs.append(epi_cost)
+        last_rewards.append(last_reward)
+        last_dists.append(last_dist)
         rollouts.append(rollout)
         safe_rate = 1 - is_unsafes[-1].max(axis=0).mean()
-        print(f"epi: {i_epi}, reward: {epi_reward:.3f}, cost: {epi_cost:.3f}, safe rate: {safe_rate * 100:.3f}%")
+        print(f"epi: {i_epi}, reward: {epi_reward:.3f}, cost: {epi_cost:.3f}, "
+              f"last_reward: {last_reward:.4f}, last_dist: {last_dist:.4f}, safe rate: {safe_rate * 100:.3f}%")
 
         rates.append(np.array(safe_rate))
 
@@ -135,6 +174,7 @@ def test(args):
     print(
         f"reward: {np.mean(rewards):.3f}, min/max reward: {np.min(rewards):.3f}/{np.max(rewards):.3f}, "
         f"cost: {np.mean(costs):.3f}, min/max cost: {np.min(costs):.3f}/{np.max(costs):.3f}, "
+        f"last_reward: {np.mean(last_rewards):.4f}, last_dist: {np.mean(last_dists):.4f}, "
         f"safe_rate: {safe_mean * 100:.3f}%"
     )
 
@@ -156,18 +196,19 @@ def test(args):
         video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.3f}_cost{costs[ii]:.3f}_sr{safe_rate:.0f}"
         viz_opts = {}
         video_path = videos_dir / f"{stamp_str}_{video_name}.mp4"
-        env.render_video(rollout, video_path, Ta_is_unsafe, viz_opts, dpi=args.dpi)
+        env.render_video(rollout, video_path, Ta_is_unsafe, viz_opts, dpi=args.dpi,
+                         show_subgoal=args.show_subgoal, subgoal_interval=args.subgoal_interval)
 
 
 def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/dgppo/seed0_815004720_WQPF")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_115153032_JEKY")
 
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=1)
+    parser.add_argument("--epi", type=int, default=2)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -176,6 +217,10 @@ def main():
     parser.add_argument("--cpu", action="store_true", default=False)
     parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--log", action="store_true", default=False)
+    parser.add_argument("--show-subgoal", action="store_true", default=True,
+                        help="Show subgoal markers in video (for hierarchical RL)")
+    parser.add_argument("--subgoal-interval", type=int, default=8,
+                        help="Subgoal interval for hierarchical RL")
 
     # default arguments
     parser.add_argument("-n", "--num-agents", type=int, default=None)

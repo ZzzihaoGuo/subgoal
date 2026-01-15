@@ -184,15 +184,16 @@ class InforMARL_SUB(Algorithm):
         self.key = key
 
         # define rollout function
-        def rollout_fn_single_(cur_params, cur_key):
+        def rollout_fn_single_(cur_params, cur_key, reach_thresh):
             return rollout_fn(self._env,
                               ft.partial(self.step, params=cur_params),
                               self.init_rnn_state,
                               cur_key,
-                              subgoal_interval=self.subgoal_interval)
+                              subgoal_interval=self.subgoal_interval,
+                              reach_thresh=reach_thresh)
 
-        def rollout_fn_(cur_params, cur_keys):
-            return jax.vmap(ft.partial(rollout_fn_single_, cur_params))(cur_keys)
+        def rollout_fn_(cur_params, cur_keys, reach_thresh):
+            return jax.vmap(ft.partial(rollout_fn_single_, cur_params, reach_thresh=reach_thresh))(cur_keys)
 
         self.rollout_fn = jax.jit(rollout_fn_)
 
@@ -207,6 +208,17 @@ class InforMARL_SUB(Algorithm):
             )
         else:
             self.cost_schedule_fn = optax.constant_schedule(cost_weight)
+
+        # set up reach threshold schedule (阈值从大到小，课程学习)
+        # 0~30%: 0.2, 30~60%: 0.03, 60~100%: 0.01
+        # self.reach_thresh_schedule_fn = optax.piecewise_constant_schedule(
+        #     init_value=0.2,  # 前期：0.2 以内就算到达
+        #     boundaries_and_scales={
+        #         int(train_steps * 0.3): 0.15,   # 30% 时 × 0.15 → 0.03
+        #         int(train_steps * 0.6): 1/3,    # 60% 时 × 0.33 → 0.01
+        #     }
+        # )
+        self.reach_thresh_schedule_fn = optax.constant_schedule(0.01) 
 
     @property
     def config(self) -> dict:
@@ -264,8 +276,9 @@ class InforMARL_SUB(Algorithm):
         assert action.shape == (self.n_agents, self.action_dim)
         return action, log_pi, rnn_state
 
-    def collect(self, params: Params, b_key: PRNGKey) -> Rollout:
-        rollout_result = self.rollout_fn(params, b_key)
+    def collect(self, params: Params, b_key: PRNGKey, step: int = 0) -> Rollout:
+        reach_thresh = self.reach_thresh_schedule_fn(step)
+        rollout_result = self.rollout_fn(params, b_key, reach_thresh)
         return rollout_result
 
     def update(self, rollout: Rollout, step: int) -> dict:

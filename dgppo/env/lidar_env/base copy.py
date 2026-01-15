@@ -1,26 +1,23 @@
 import pathlib
-import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import functools as ft
-import einops as ei
 
 from typing import NamedTuple, Tuple, Optional
 from abc import ABC, abstractmethod
 
 from jaxtyping import Float
-from jaxproxqp.jaxproxqp import JaxProxQP
 
 from ...trainer.data import Rollout
 from ...utils.graph import EdgeBlock, GetGraph, GraphsTuple
-from ...utils.typing import Action, Array, Cost, Done, Info, Pos2d, Reward, State, AgentState, Params
-from ...utils.utils import merge01, jax_vmap, mask2index
+from ...utils.typing import Action, Array, Cost, Done, Info, Pos2d, Reward, State, AgentState
+from ...utils.utils import merge01, jax_vmap
 from ..base import MultiAgentEnv
 from dgppo.env.obstacle import Obstacle, Rectangle
 from dgppo.env.plot import render_lidar
 from dgppo.env.utils import get_lidar, lqr, get_node_goal_rng
-from dgppo.algo.utils import get_pwise_cbf_fn, get_pwise_cbf_with_jacobian_fn
+from dgppo.algo.dec_share_cbf import DecShareCBF
 
 
 class LidarEnvState(NamedTuple):
@@ -45,7 +42,6 @@ class LidarEnv(MultiAgentEnv, ABC):
     PARAMS = {
         "car_radius": 0.05,
         "comm_radius": 0.5,
-        "cbf_comm_radius": 100,
         "n_rays": 32,
         "obs_len_range": [0.1, 0.3],
         "n_obs": 3,
@@ -61,8 +57,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             area_size: Optional[float] = None,
             max_step: int = 256,
             dt: float = 0.03,
-            params: dict = None,
-            cbf_alpha: float = 10.0
+            params: dict = None
     ):
         area_size = LidarEnv.PARAMS["default_area_size"] if area_size is None else area_size
         super(LidarEnv, self).__init__(num_agents, area_size, max_step, dt, params)
@@ -85,16 +80,6 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         self.create_obstacles = jax_vmap(Rectangle.create)
         self.num_goals = self._num_agents
-
-        # CBF 参数
-        self.cbf_alpha = cbf_alpha
-        self.k = 3  # 考虑最近的 k 个邻居
-        self._cbf = None  # 延迟初始化
-        self._cbf_with_jacobian = None  # 带解析雅可比的 CBF
-        self._safe_u_ref_jit = None  # JIT: CBF + QP
-        self._u_ref_only_jit = None  # JIT: 纯 u_ref
-        self._get_min_lidar_dist_jit = None  # JIT: LiDAR 距离计算
-        self.lidar_skip_threshold = 0.01  # LiDAR 距离阈值，大于此值跳过 CBF/QP
 
     @property
     def state_dim(self) -> int:
@@ -316,15 +301,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         lower_lim = jnp.ones(2) * -1.0
         upper_lim = jnp.ones(2)
         return lower_lim, upper_lim
-
-    def control_affine_dyn(self, state: State) -> [Array, Array]:
-        assert state.ndim == 2
-        f = jnp.concatenate([state[:, 2:], jnp.zeros((state.shape[0], 2))], axis=1)
-        g = jnp.concatenate([jnp.zeros((2, 2)), jnp.eye(2) / self._params['m']], axis=0)
-        g = jnp.expand_dims(g, axis=0).repeat(f.shape[0], axis=0)
-        assert f.shape == state.shape
-        assert g.shape == (state.shape[0], self.state_dim, self.action_dim)
-        return f, g
+    
 
     def u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
         agent = graph.type_states(type_idx=0, n_type=self.num_agents)
@@ -368,257 +345,3 @@ class LidarEnv(MultiAgentEnv, ABC):
         error_max = jnp.abs(error / jnp.linalg.norm(error, axis=-1, keepdims=True) * self._params["comm_radius"])
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
-
-
-    def init_cbf(self, use_analytical_jacobian: bool = True, use_adaptive: bool = True):
-        """初始化 CBF 函数和 JIT 编译 - 必须在使用前调用
-
-        Args:
-            use_analytical_jacobian: 是否使用解析雅可比矩阵（更快），默认 True
-            use_adaptive: 是否使用自适应模式（每个 timestep 根据 agent 间距离动态选择），默认 True
-
-        Note:
-            - 自适应模式：agent 间最小距离 < cbf_comm_radius 时用 CBF，否则用纯 u_ref
-            - 非自适应模式：总是使用 CBF
-        """
-        if self._cbf is None:
-            print("Initializing CBF function...")
-            self._cbf = get_pwise_cbf_fn(self, self.k)
-
-        if self._cbf_with_jacobian is None and use_analytical_jacobian:
-            print("Initializing CBF with analytical Jacobian...")
-            self._cbf_with_jacobian = get_pwise_cbf_with_jacobian_fn(self, self.k, self.cbf_alpha)
-
-        if self._safe_u_ref_jit is None:
-            if use_adaptive:
-                cbf_comm_radius = self._params["cbf_comm_radius"]
-                print(f"JIT compiling adaptive_safe_u_ref (cbf_comm_radius={cbf_comm_radius})...")
-                self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl)
-            else:
-                print("JIT compiling safe_u_ref (always use CBF)...")
-                if use_analytical_jacobian:
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl_fast)
-                else:
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl)
-
-        if self._u_ref_only_jit is None:
-            print("JIT compiling u_ref_only...")
-            self._u_ref_only_jit = jax.jit(self._u_ref_only)
-
-        if self._get_min_lidar_dist_jit is None:
-            print("JIT compiling get_min_lidar_dist...")
-            self._get_min_lidar_dist_jit = jax.jit(self._get_min_lidar_dist)
-
-        return self
-
-    def get_cbf(self, graph: GraphsTuple) -> tuple[Array, Array]:
-        """获取 CBF 值"""
-        # 注意：self._cbf 必须在 JIT 之前初始化（调用 init_cbf）
-        ak_h0, ak_isobs = self._cbf(graph)
-        return ak_h0, ak_isobs
-
-    def get_qp_action(self, graph: GraphsTuple, u_ref: Optional[Action] = None, relax_penalty: float = 1e3) -> [Action, Array]:
-        """获取 QP 过滤后的安全动作"""
-        agent_node_mask = graph.node_type == 0
-        agent_node_id = mask2index(agent_node_mask, self.num_agents)
-
-        def h_aug(new_agent_state: State) -> tuple[Array, Array]:
-            new_state = graph.states.at[agent_node_id].set(new_agent_state)
-            new_graph = graph._replace(edges=new_state[graph.receivers] - new_state[graph.senders], states=new_state)
-            ak_h_, ak_isobs_ = self.get_cbf(new_graph)
-            return ak_h_, ak_isobs_
-
-        def h(new_agent_state: State) -> Array:
-            return h_aug(new_agent_state)[0]
-
-        agent_state = graph.type_states(type_idx=0, n_type=self.num_agents)
-        # (n_agents, k)
-        ak_h, ak_isobs = h_aug(agent_state)
-        # (n_agents, k | n_agents, nx)
-        ak_hx = jax.jacfwd(h)(agent_state)
-
-        a_dyn_f, a_dyn_g = self.control_affine_dyn(agent_state)
-        ak_Lf_h = ei.einsum(ak_hx, a_dyn_f, "agent_i k agent_j nx, agent_j nx -> agent_i k")
-        aka_Lg_h: Array = ei.einsum(ak_hx, a_dyn_g, "agent_i k agent_j nx, agent_j nx nu -> agent_i k agent_j nu")
-
-        def index_fn(idx: int):
-            k_Lg_h = aka_Lg_h[idx, :, idx]
-            return k_Lg_h
-
-        ak_Lg_h_self = jax_vmap(index_fn)(jnp.arange(self.num_agents))
-
-        # 如果没有提供 u_ref，使用默认的
-
-        au_ref = u_ref
-
-        # (n_agents, ). 1 if agent-obs, 0.5 if agent-agent.
-        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
-
-        # construct QP
-        au_opt, ar = jax_vmap(ft.partial(self._solve_qp_single, relax_penalty=relax_penalty))(
-            ak_h, ak_Lf_h, ak_Lg_h_self, au_ref, ak_resp
-        )
-        return au_opt, ar
-
-    def _solve_qp_single(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float, relax_penalty: float = 1e3):
-        """单个 agent 的 QP 求解（JIT 兼容，无 assert）"""
-        n_qp_x = self.action_dim + self.k
-
-        u_lb, u_ub = self.action_lim()
-
-        H = jnp.eye(n_qp_x, dtype=jnp.float32)
-        H = H.at[-self.k :, -self.k :].set(10.0)
-        g = jnp.concatenate([-u_ref, relax_penalty * jnp.ones(self.k)], axis=0)
-
-        k_C = -jnp.concatenate([k_Lg_h, jnp.eye(self.k)], axis=1)
-
-        # Responsibility is one if agent-obs, half if agent-agent.
-        k_b = k_responsibility * (k_Lf_h + self.cbf_alpha * k_h)
-
-        r_lb = jnp.full(self.k, 0.0, dtype=jnp.float32)
-        r_ub = jnp.full(self.k, jnp.inf, dtype=jnp.float32)
-
-        l_box = jnp.concatenate([u_lb, r_lb], axis=0)
-        u_box = jnp.concatenate([u_ub, r_ub], axis=0)
-
-        qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
-        settings = JaxProxQP.Settings.default()
-        settings.max_iter = 3
-
-        settings.dua_gap_thresh_abs = None
-        solver = JaxProxQP(qp, settings)
-        sol = solver.solve()
-
-        u_opt, r = sol.x[: self.action_dim], sol.x[-self.k :]
-
-        return u_opt, r
-
-    def _safe_u_ref_impl(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """safe_u_ref 的内部实现（会被 JIT 编译）"""
-        nominal_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-        action, _ = self.get_qp_action(graph, u_ref=nominal_action)
-        return action
-
-    def get_qp_action_fast(self, graph: GraphsTuple, u_ref: Action, relax_penalty: float = 1e3) -> tuple[Action, Array]:
-        """优化版本：使用解析雅可比矩阵，跳过 jax.jacfwd"""
-        agent_state = graph.type_states(type_idx=0, n_type=self.num_agents)
-
-        # 使用解析雅可比矩阵（核心优化）
-        ak_h, ak_isobs, ak_hx_self = self._cbf_with_jacobian(graph)
-        # ak_h: (n_agents, k)
-        # ak_isobs: (n_agents, k)
-        # ak_hx_self: (n_agents, k, nx) - 每个 agent 的 CBF 对自己状态的雅可比
-
-        a_dyn_f, a_dyn_g = self.control_affine_dyn(agent_state)
-        # a_dyn_f: (n_agents, nx)
-        # a_dyn_g: (n_agents, nx, nu)
-
-        # Lf_h = ∂h/∂x · f(x)
-        ak_Lf_h = ei.einsum(ak_hx_self, a_dyn_f, "a k nx, a nx -> a k")
-
-        # Lg_h = ∂h/∂x · g(x)
-        ak_Lg_h_self = ei.einsum(ak_hx_self, a_dyn_g, "a k nx, a nx nu -> a k nu")
-
-        # 责任系数: 1 if agent-obs, 0.5 if agent-agent
-        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
-
-        # 构建并求解 QP
-        au_opt, ar = jax_vmap(ft.partial(self._solve_qp_single, relax_penalty=relax_penalty))(
-            ak_h, ak_Lf_h, ak_Lg_h_self, u_ref, ak_resp
-        )
-        return au_opt, ar
-
-    def _get_min_lidar_dist(self, graph: GraphsTuple) -> Array:
-        """快速计算最近 LiDAR 距离（用于早期跳过判断）"""
-        n_rays = self._params["top_k_rays"]
-        r = self._params["car_radius"]
-
-        # 获取 agent 和障碍物位置
-        a_pos = graph.type_states(type_idx=0, n_type=self.num_agents)[:, :2]  # (n_agent, 2)
-        obs_states = graph.type_states(type_idx=2, n_type=self.num_agents * n_rays)
-        obs_pos = ei.rearrange(obs_states[:, :2], "(n_agent n_ray) d -> n_agent n_ray d", n_agent=self.num_agents)
-
-        # 计算每个 agent 到其 LiDAR 点的距离
-        # a_pos: (n_agent, 2), obs_pos: (n_agent, n_ray, 2)
-        dist = jnp.linalg.norm(a_pos[:, None, :] - obs_pos, axis=-1)  # (n_agent, n_ray)
-        dist = dist - 2 * r  # 减去两倍半径（agent + obstacle）
-
-        return dist.min()
-
-    def _safe_u_ref_impl_fast(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """优化版本：解析雅可比 + QP"""
-        nominal_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-        ak_h, ak_isobs, ak_hx_self = self._cbf_with_jacobian(graph)
-        agent_state = graph.type_states(type_idx=0, n_type=self.num_agents)
-        a_dyn_f, a_dyn_g = self.control_affine_dyn(agent_state)
-        ak_Lf_h = ei.einsum(ak_hx_self, a_dyn_f, "a k nx, a nx -> a k")
-        ak_Lg_h_self = ei.einsum(ak_hx_self, a_dyn_g, "a k nx, a nx nu -> a k nu")
-        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
-        au_opt, _ = jax_vmap(ft.partial(self._solve_qp_single, relax_penalty=1e3))(
-            ak_h, ak_Lf_h, ak_Lg_h_self, nominal_action, ak_resp
-        )
-        return au_opt
-
-    def _u_ref_only(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """纯 u_ref，无 CBF（用于邻居距离足够远时）"""
-        return self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-
-    def _get_min_neighbor_dist(self, graph: GraphsTuple) -> Array:
-        """计算到最近邻居（agent 或 obstacle）的距离"""
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]  # (n_agent, 2)
-
-        # Agent-agent 距离
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)  # (n_agent, n_agent)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6  # 排除自己
-        min_agent_dist = agent_dist.min()
-
-        # Agent-obstacle 距离（如果有障碍物）
-        if self.params["n_obs"] > 0:
-            n_rays = self._params["top_k_rays"]
-            obs_states = graph.type_states(type_idx=2, n_type=self.num_agents * n_rays)
-            obs_pos = obs_states[:, :2].reshape(self.num_agents, n_rays, 2)  # (n_agent, n_rays, 2)
-            obs_dist = jnp.linalg.norm(agent_pos[:, None, :] - obs_pos, axis=-1)  # (n_agent, n_rays)
-            min_obs_dist = obs_dist.min()
-            return jnp.minimum(min_agent_dist, min_obs_dist)
-        else:
-            return min_agent_dist
-
-    def _adaptive_safe_u_ref_impl(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """自适应安全控制器：每个 agent 单独判断是否使用 CBF
-
-        对于每个 agent：
-        - 如果该 agent 到最近其他 agent 的距离 >= comm_radius，使用纯 u_ref
-        - 如果该 agent 到最近其他 agent 的距离 < comm_radius，使用 safe_u_ref (CBF)
-        """
-        cbf_comm_radius = self._params["cbf_comm_radius"]
-
-        # 计算每个 agent 到最近其他 agent 的距离
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6  # 排除自己
-        min_dist_per_agent = agent_dist.min(axis=1)  # (n_agent,) 每个 agent 到最近邻居的距离
-
-        # 每个 agent 单独判断：附近有其他 agent 时用 CBF
-        use_cbf_per_agent = min_dist_per_agent < cbf_comm_radius  # (n_agent,)
-
-        # 计算两种控制器的输出
-        u_ref_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)  # (n_agent, action_dim)
-        safe_action = self._safe_u_ref_impl_fast(graph, target_pos, is_final_goal)  # (n_agent, action_dim)
-
-        # 每个 agent 单独选择
-        return jnp.where(use_cbf_per_agent[:, None], safe_action, u_ref_action)
-
-    def safe_u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
-        """安全的参考控制器：u_ref + CBF过滤
-
-        如果设置了 cbf_comm_radius，则只在有邻居在该范围内时才使用 CBF；
-        否则总是使用 CBF。
-        """
-        if self._safe_u_ref_jit is None:
-            raise RuntimeError("Must call init_cbf() before using safe_u_ref")
-
-        return self._safe_u_ref_jit(graph, target_pos, is_final_goal)
-
-

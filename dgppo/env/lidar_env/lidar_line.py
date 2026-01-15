@@ -30,10 +30,11 @@ class LidarLine(LidarSpread):
             area_size: Optional[float] = None,
             max_step: int = 128,
             dt: float = 0.03,
-            params: dict = None
+            params: dict = None,
+            cbf_alpha: float = 10.0
     ):
         area_size = LidarLine.PARAMS["default_area_size"] if area_size is None else area_size
-        super(LidarLine, self).__init__(num_agents, area_size, max_step, dt, params)
+        super(LidarLine, self).__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
         self.num_goals = 2
 
     def reset(self, key: Array) -> GraphsTuple:

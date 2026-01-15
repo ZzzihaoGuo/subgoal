@@ -478,6 +478,8 @@ def render_lidar(
         viz_opts: dict = None,
         dpi: int = 100,
         n_goal: Optional[int] = None,
+        show_subgoal: bool = False,
+        subgoal_interval: int = 40,
         **kwargs
 ):
     assert dim == 1 or dim == 2 or dim == 3
@@ -509,6 +511,7 @@ def render_lidar(
     agent_color = "#0068ff"
     goal_color = "#2fdd00"
     obs_color = "#8a0000"
+    subgoal_color = "#ff6600"  # orange for subgoals
     edge_goal_color = goal_color
 
     # plot obstacles
@@ -533,6 +536,27 @@ def render_lidar(
         plot_r = ax.transData.transform([r, 0])[0] - ax.transData.transform([0, 0])[0]
         agent_col = ax.scatter(n_pos[:, 0], n_pos[:, 1], n_pos[:, 2],
                                s=plot_r, c=n_color, zorder=5)  # todo: the size of the agent might not be correct
+
+    # plot subgoals (if enabled)
+    subgoal_markers = []
+    subgoal_lines = []  # lines from agent to subgoal
+    if show_subgoal and dim == 2:
+        # rollout.actions contains subgoals: (T, n_agent, 2)
+        subgoal_pos_0 = np.array(rollout.actions[0, :, :2])  # (n_agent, 2)
+        agent_pos_0 = np.array(graph0.states[:n_agent, :2])
+
+        for ii in range(n_agent):
+            # subgoal marker (star)
+            marker, = ax.plot(subgoal_pos_0[ii, 0], subgoal_pos_0[ii, 1],
+                            marker='*', markersize=15, color=subgoal_color,
+                            markeredgecolor='black', markeredgewidth=1, zorder=8)
+            subgoal_markers.append(marker)
+
+            # line from agent to subgoal
+            line, = ax.plot([agent_pos_0[ii, 0], subgoal_pos_0[ii, 0]],
+                           [agent_pos_0[ii, 1], subgoal_pos_0[ii, 1]],
+                           '--', color=subgoal_color, linewidth=1.5, alpha=0.7, zorder=4)
+            subgoal_lines.append(line)
 
     # plot edges
     all_pos = graph0.states[:n_agent + n_goal + n_hits, :dim]
@@ -636,7 +660,8 @@ def render_lidar(
 
     # init function for animation
     def init_fn() -> list[plt.Artist]:
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text]
+        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text,
+                *subgoal_markers, *subgoal_lines]
 
     # update function for animation
     def update(kk: int) -> list[plt.Artist]:
@@ -652,6 +677,17 @@ def render_lidar(
         else:
             agent_col.set_offsets(n_pos_t[:n_agent + n_goal, :2])
             agent_col.set_3d_properties(n_pos_t[:n_agent + n_goal, 2], zdir='z')
+
+        # update subgoals
+        if show_subgoal and dim == 2:
+            subgoal_pos_t = np.array(rollout.actions[kk, :, :2])
+            agent_pos_t = np.array(graph.states[:n_agent, :2])
+            for ii in range(n_agent):
+                # update subgoal marker position
+                subgoal_markers[ii].set_data([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]])
+                # update line from agent to subgoal
+                subgoal_lines[ii].set_data([agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
+                                           [agent_pos_t[ii, 1], subgoal_pos_t[ii, 1]])
 
         # update edges
         e_edge_index_t = np.stack([graph.senders, graph.receivers], axis=0)
@@ -713,7 +749,8 @@ def render_lidar(
 
         kk_text.set_text("kk={:04}".format(kk))
 
-        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text]
+        return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text,
+                *subgoal_markers, *subgoal_lines]
 
     fps = 30.0
     spf = 1 / fps

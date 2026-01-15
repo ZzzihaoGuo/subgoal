@@ -50,7 +50,7 @@ class TanhNormal(PolicyDistribution):
     scale_final: float = 0.01
     std_dev_min: float = 1e-5
     std_dev_init: float = 0.5
-
+    
     @property
     def std_dev_init_inv(self):
         # inverse of log(sum(exp())).

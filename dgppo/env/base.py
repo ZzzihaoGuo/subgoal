@@ -35,7 +35,7 @@ class MultiAgentEnv(ABC):
             self,
             num_agents: int,
             area_size: float,
-            max_step: int = 256,
+            max_step: int = 128,
             dt: float = 0.03,
             params: Optional[dict] = None
     ):

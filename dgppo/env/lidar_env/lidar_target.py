@@ -27,10 +27,11 @@ class LidarTarget(LidarEnv):
             area_size: Optional[float] = None,
             max_step: int = 128,
             dt: float = 0.03,
-            params: dict = None
+            params: dict = None,
+            cbf_alpha: float = 10.0
     ):
         area_size = LidarTarget.PARAMS["default_area_size"] if area_size is None else area_size
-        super(LidarTarget, self).__init__(num_agents, area_size, max_step, dt, params)
+        super(LidarTarget, self).__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
 
     def get_reward(self, graph: LidarEnvGraphsTuple, action: Action) -> Reward:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)

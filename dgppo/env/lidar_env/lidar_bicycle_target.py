@@ -40,10 +40,11 @@ class LidarBicycleTarget(LidarTarget):
             area_size: Optional[float] = None,
             max_step: int = 128,
             dt: float = 0.03,
-            params: dict = None
+            params: dict = None,
+            cbf_alpha: float = 10.0
     ):
         area_size = LidarBicycleTarget.PARAMS["default_area_size"] if area_size is None else area_size
-        super(LidarBicycleTarget, self).__init__(num_agents, area_size, max_step, dt, params)
+        super(LidarBicycleTarget, self).__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
 
     @property
     def state_dim(self) -> int:

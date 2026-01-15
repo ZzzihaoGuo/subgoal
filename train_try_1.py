@@ -7,9 +7,13 @@ import numpy as np
 import wandb
 import yaml
 
+# 抑制 jaxproxqp 的 debug 输出
+from loguru import logger
+logger.disable("jaxproxqp")
+
 from dgppo.algo import make_algo
 from dgppo.env import make_env
-from dgppo.trainer.trainer import Trainer
+from dgppo.trainer.trainer_subgoal import Trainer
 from dgppo.trainer.utils import is_connected
 
 
@@ -32,6 +36,8 @@ def train(args):
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        max_step=args.max_step,
+        cbf_alpha=args.alpha,
     )
     env_test = make_env(
         env_id=args.env,
@@ -39,6 +45,8 @@ def train(args):
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        max_step=args.max_step,
+        cbf_alpha=args.alpha,
     )
 
     # create algorithm
@@ -130,6 +138,35 @@ def train(args):
             yaml.dump(args, f)
             yaml.dump(algo.config, f)
 
+    # ========== Warmup: 预编译 CBF 和 JIT 函数 ==========
+    import jax
+    import jax.random as jr
+    import time
+    print(f"JAX devices: {jax.devices()}")
+    print(f"Default backend: {jax.default_backend()}")
+
+    # 1. 初始化 CBF 函数和 JIT 编译
+    env.init_cbf()
+    env_test.init_cbf()
+
+    # 2. 预热 safe_u_ref（触发首次 JIT 编译）
+    print("Warming up CBF controller (first JIT compile)...")
+    warmup_key = jr.PRNGKey(42)
+    warmup_graph = env.reset(warmup_key)
+    target_pos = warmup_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+
+    start = time.time()
+    action = env.safe_u_ref(warmup_graph, target_pos=target_pos, is_final_goal=False)
+    jax.block_until_ready(action)
+    print(f"First compile: {time.time() - start:.2f}s")
+
+    start = time.time()
+    action = env.safe_u_ref(warmup_graph, target_pos=target_pos, is_final_goal=False)
+    jax.block_until_ready(action)
+    print(f"Cached call: {time.time() - start:.4f}s")
+    print("CBF warmup complete!")
+    # ====================================================
+
     # start training
     trainer.train()
 
@@ -141,7 +178,7 @@ def main():
     parser.add_argument("--env", type=str, default="LidarSpread")
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--algo", type=str, default="informarl_subgoal")
-    parser.add_argument("--obs", type=int, default=2)
+    parser.add_argument("--obs", type=int, default=3)
 
 
 
@@ -161,7 +198,7 @@ def main():
     parser.add_argument("--alpha", type=float, default=10.0)
     parser.add_argument("--no-cbf-schedule", action="store_true", default=False)
     parser.add_argument("--cost-schedule", action="store_true", default=False)
-    parser.add_argument("--no-rnn", action="store_true", default=False)
+    parser.add_argument("--no-rnn", action="store_true", default=True)
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
@@ -176,18 +213,25 @@ def main():
     parser.add_argument("--rnn-step", type=int, default=1)
 
     # default arguments
-    parser.add_argument("--n-env-train", type=int, default=128)
-    parser.add_argument("--batch-size", type=int, default=128*7)
+    parser.add_argument("--n-env-train", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=50)
     parser.add_argument("--eval-epi", type=int, default=1)
     parser.add_argument("--save-interval", type=int, default=50)
 
-    parser.add_argument("--subgoal-interval", type=int, default=20,
+    parser.add_argument("--subgoal-interval", type=int, default=8,
                     help="Hierarchical RL: steps between subgoal generation")
+    parser.add_argument("--max-step", type=int, default=128,
+                    help="Max timesteps per episode")
 
     args = parser.parse_args()
+
+    # Auto-compute batch_size based on subgoal_interval if not provided
+    if args.batch_size is None:
+        args.batch_size = args.n_env_train * (args.max_step // args.subgoal_interval)
+
     train(args)
 
 
