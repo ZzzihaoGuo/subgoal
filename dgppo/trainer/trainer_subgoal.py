@@ -86,7 +86,7 @@ class Trainer:
         # get subgoal_interval from algo config if available
         subgoal_interval = getattr(self.algo, 'subgoal_interval', 40)
 
-        def test_fn_single(params, key, reach_thresh):
+        def test_fn_single(params, key, reach_thresh, use_cbf):
             act_fn = ft.partial(self.algo.act, params=params)
             return test_rollout_subgoal(
                 self.env_test,
@@ -96,12 +96,18 @@ class Trainer:
                 subgoal_interval=subgoal_interval,
                 filter_high_level=True,  # 训练统计时只用高层决策点数据
                 reach_thresh=reach_thresh,
+                use_cbf=use_cbf,  # 与训练时保持一致
             )
 
-        def test_fn(params, keys, reach_thresh):
-            return jax.vmap(ft.partial(test_fn_single, params, reach_thresh=reach_thresh))(keys)
+        # 创建两个版本的 test_fn，避免 use_cbf 被 trace
+        def test_fn_no_cbf(params, keys, reach_thresh):
+            return jax.vmap(ft.partial(test_fn_single, params, reach_thresh=reach_thresh, use_cbf=False))(keys)
 
-        test_fn = jax.jit(test_fn)
+        def test_fn_with_cbf(params, keys, reach_thresh):
+            return jax.vmap(ft.partial(test_fn_single, params, reach_thresh=reach_thresh, use_cbf=True))(keys)
+
+        test_fn_no_cbf = jax.jit(test_fn_no_cbf)
+        test_fn_with_cbf = jax.jit(test_fn_with_cbf)
 
         # start training
         test_key = jr.PRNGKey(self.seed)
@@ -115,7 +121,15 @@ class Trainer:
                 eval_info = {}
                 # 获取当前的 reach_thresh
                 reach_thresh = getattr(self.algo, 'reach_thresh_schedule_fn', lambda x: 0.1)(step)
-                test_rollouts: Rollout = test_fn(self.algo.params, test_keys, reach_thresh)
+                # 根据 step 决定是否使用 CBF（与训练时保持一致）
+                cbf_start_step = getattr(self.algo, 'cbf_start_step', 0)
+                use_cbf_now = step >= cbf_start_step
+                if step % 1000 == 0:  # 每1000步打印一次
+                    print(f"[DEBUG] step={step}, cbf_start_step={cbf_start_step}, use_cbf={use_cbf_now}")
+                if use_cbf_now:
+                    test_rollouts: Rollout = test_fn_with_cbf(self.algo.params, test_keys, reach_thresh)
+                else:
+                    test_rollouts: Rollout = test_fn_no_cbf(self.algo.params, test_keys, reach_thresh)
 
                 # 环境reward统计
                 total_reward = test_rollouts.rewards.sum(axis=-1)

@@ -24,7 +24,7 @@ GOAL_REWARD_COEF = 0.2          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
 SUBGOAL_BONUS_COEF = 0.02       # subgoal_bonus 系数
-DIST_TO_GOAL_COEF = 0.02        # dist_agent_to_goal 系数
+DIST_TO_GOAL_COEF = 0.05        # dist_agent_to_goal 系数
 # ===================================================================
 
 
@@ -35,6 +35,7 @@ def rollout_hierarchical(
         key: PRNGKey,
         subgoal_interval: int = 40,  # 每40步生成一个subgoal
         reach_thresh: float = 0.1,  # 判断"到达"的阈值，会随训练逐渐减小
+        use_cbf: bool = True,  # 是否使用 CBF 安全控制器
 ) -> Rollout:
     """
     Hierarchical rollout: 高层每40步生成subgoal，低层每步用u_ref跟踪
@@ -98,8 +99,11 @@ def rollout_hierarchical(
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
         # is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
 
-        # 只在 subgoal 边界时调用 CBF，其他时间用普通 u_ref（提速）safe_u_ref
-        action = env.safe_u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        # 根据 use_cbf 选择控制器（use_cbf 是编译时常量，不会有运行时开销）
+        if use_cbf:
+            action = env.safe_u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        else:
+            action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
 
         # 环境交互
         next_graph, reward, cost, done, info = env.step(graph, action)
@@ -249,6 +253,7 @@ def test_rollout_subgoal(
         subgoal_interval: int = 40,
         filter_high_level: bool = False,  # 是否只返回高层决策点数据
         reach_thresh: float = 0.1,  # 判断"到达"的阈值，与训练时保持一致
+        use_cbf: bool = False,  # 是否使用 CBF 安全控制器
 ):
     """
     测试层级RL的rollout函数
@@ -314,8 +319,11 @@ def test_rollout_subgoal(
         dist_to_real_goal = jnp.linalg.norm(new_subgoal - real_goal, axis=-1)
         # is_final_goal = (dist_to_real_goal < env.params.get("dist2goal", 0.1) * 2).all()
 
-        # 调用u_ref跟踪subgoal，safe_u_ref
-        action = env.safe_u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        # 根据 use_cbf 选择控制器
+        if use_cbf:
+            action = env.safe_u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        else:
+            action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
 
         # 环境交互
         next_graph, reward, cost, done, info = env.step(graph, action)

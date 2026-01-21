@@ -59,6 +59,8 @@ class InforMARL_SUB(Algorithm):
             use_lstm: bool = False,
             cost_schedule: bool = False,
             train_steps: int = 1e5,
+            use_relative_subgoal: bool = False,  # 是否使用相对坐标
+            max_delta: float = None,  # 相对模式下的最大偏移量
             **kwargs
     ):
         super(InforMARL_SUB, self).__init__(
@@ -72,6 +74,8 @@ class InforMARL_SUB(Algorithm):
         # 保存新参数
         self.subgoal_interval = subgoal_interval
         self.area_size = area_size
+        self.use_relative_subgoal = use_relative_subgoal
+        self.max_delta = max_delta
 
         # set hyperparameters
         self.cost_weight = cost_weight
@@ -118,7 +122,9 @@ class InforMARL_SUB(Algorithm):
             rnn_layers=self.rnn_layers,
             gnn_layers=self.actor_gnn_layers,
             gnn_out_dim=64,
-            use_lstm=self.use_lstm
+            use_lstm=self.use_lstm,
+            use_relative_subgoal=self.use_relative_subgoal,
+            max_delta=self.max_delta
         )
 
         # initialize the rnn state
@@ -183,19 +189,39 @@ class InforMARL_SUB(Algorithm):
         # set up key
         self.key = key
 
-        # define rollout function
-        def rollout_fn_single_(cur_params, cur_key, reach_thresh):
+        # define rollout function - 两个版本，分别 JIT 编译
+        # 版本1：不使用 CBF（前 80k 步用，更快）
+        def rollout_fn_single_no_cbf_(cur_params, cur_key, reach_thresh):
             return rollout_fn(self._env,
                               ft.partial(self.step, params=cur_params),
                               self.init_rnn_state,
                               cur_key,
                               subgoal_interval=self.subgoal_interval,
-                              reach_thresh=reach_thresh)
+                              reach_thresh=reach_thresh,
+                              use_cbf=False)
 
-        def rollout_fn_(cur_params, cur_keys, reach_thresh):
-            return jax.vmap(ft.partial(rollout_fn_single_, cur_params, reach_thresh=reach_thresh))(cur_keys)
+        def rollout_fn_no_cbf_(cur_params, cur_keys, reach_thresh):
+            return jax.vmap(ft.partial(rollout_fn_single_no_cbf_, cur_params, reach_thresh=reach_thresh))(cur_keys)
 
-        self.rollout_fn = jax.jit(rollout_fn_)
+        # 版本2：使用 CBF（80k 步后用）
+        def rollout_fn_single_with_cbf_(cur_params, cur_key, reach_thresh):
+            return rollout_fn(self._env,
+                              ft.partial(self.step, params=cur_params),
+                              self.init_rnn_state,
+                              cur_key,
+                              subgoal_interval=self.subgoal_interval,
+                              reach_thresh=reach_thresh,
+                              use_cbf=True)
+
+        def rollout_fn_with_cbf_(cur_params, cur_keys, reach_thresh):
+            return jax.vmap(ft.partial(rollout_fn_single_with_cbf_, cur_params, reach_thresh=reach_thresh))(cur_keys)
+
+        # 分别 JIT 编译，避免不必要的 CBF 代码编译
+        self.rollout_fn_no_cbf = jax.jit(rollout_fn_no_cbf_)
+        self.rollout_fn_with_cbf = jax.jit(rollout_fn_with_cbf_)
+
+        # CBF 切换的 step 阈值
+        self.cbf_start_step = 80 # 80000
 
         # set up cost schedule
         if self.cost_schedule:
@@ -242,7 +268,9 @@ class InforMARL_SUB(Algorithm):
             'rnn_layers': self.rnn_layers,
             'rnn_step': self.rnn_step,
             'use_lstm': self.use_lstm,
-            'cost_schedule': self.cost_schedule
+            'cost_schedule': self.cost_schedule,
+            'use_relative_subgoal': self.use_relative_subgoal,
+            'max_delta': self.max_delta
         }
 
     @property
@@ -278,7 +306,11 @@ class InforMARL_SUB(Algorithm):
 
     def collect(self, params: Params, b_key: PRNGKey, step: int = 0) -> Rollout:
         reach_thresh = self.reach_thresh_schedule_fn(step)
-        rollout_result = self.rollout_fn(params, b_key, reach_thresh)
+        # Python if - 零开销，前 cbf_start_step 步完全不触发 CBF 代码
+        if step < self.cbf_start_step:
+            rollout_result = self.rollout_fn_no_cbf(params, b_key, reach_thresh)
+        else:
+            rollout_result = self.rollout_fn_with_cbf(params, b_key, reach_thresh)
         return rollout_result
 
     def update(self, rollout: Rollout, step: int) -> dict:

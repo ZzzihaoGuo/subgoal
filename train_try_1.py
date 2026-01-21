@@ -85,7 +85,9 @@ def train(args):
         lr_lagr=args.lr_lagr,
         train_steps=args.steps,
         cbf_schedule=not args.no_cbf_schedule,
-        cost_schedule=args.cost_schedule
+        cost_schedule=args.cost_schedule,
+        use_relative_subgoal=args.relative_subgoal,
+        max_delta=args.max_delta
     )
 
     # Generate a 4 letter random identifier for the run.
@@ -146,8 +148,10 @@ def train(args):
     print(f"Default backend: {jax.default_backend()}")
 
     # 1. 初始化 CBF 函数和 JIT 编译
-    env.init_cbf()
-    env_test.init_cbf()
+    # use_closed_form=True: 闭式解（快 10-50x）
+    # use_closed_form=False: QP求解（更精确）
+    env.init_cbf(use_adaptive=True, use_closed_form=True)
+    env_test.init_cbf(use_adaptive=True, use_closed_form=True)
 
     # 2. 预热 safe_u_ref（触发首次 JIT 编译）
     print("Warming up CBF controller (first JIT compile)...")
@@ -184,7 +188,7 @@ def main():
 
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--steps", type=int, default=200000)
+    parser.add_argument("--steps", type=int, default=300000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cost-weight", type=float, default=0.)
@@ -195,10 +199,16 @@ def main():
     parser.add_argument('--lr-lagr', type=float, default=1e-7)
     parser.add_argument("--cbf-weight", type=float, default=1.0)
     parser.add_argument("--cbf-eps", type=float, default=1e-2)
-    parser.add_argument("--alpha", type=float, default=10.0)
+    parser.add_argument("--alpha", type=float, default=50.0)
     parser.add_argument("--no-cbf-schedule", action="store_true", default=False)
     parser.add_argument("--cost-schedule", action="store_true", default=False)
     parser.add_argument("--no-rnn", action="store_true", default=True)
+
+    # Subgoal mode arguments
+    parser.add_argument("--relative-subgoal", action="store_true", default=True,
+                        help="Use relative subgoal (delta from current pos) instead of absolute coordinates")
+    parser.add_argument("--max-delta", type=float, default=0.2,
+                        help="Max delta for relative subgoal mode (default: area_size/4)")
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
@@ -213,13 +223,13 @@ def main():
     parser.add_argument("--rnn-step", type=int, default=1)
 
     # default arguments
-    parser.add_argument("--n-env-train", type=int, default=1024)
+    parser.add_argument("--n-env-train", type=int, default=1024) 
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")
-    parser.add_argument("--eval-interval", type=int, default=50)
+    parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-epi", type=int, default=1)
-    parser.add_argument("--save-interval", type=int, default=50)
+    parser.add_argument("--save-interval", type=int, default=100)
 
     parser.add_argument("--subgoal-interval", type=int, default=8,
                     help="Hierarchical RL: steps between subgoal generation")

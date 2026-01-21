@@ -229,10 +229,14 @@ class SubgoalPolicy(MultiAgentPolicy):
             gnn_layers: int = 2,
             gnn_out_dim: int = 64,
             use_lstm: bool = False,
+            use_relative_subgoal: bool = False,  # 是否使用相对坐标
+            max_delta: float = None,  # 相对模式下的最大偏移量，默认为 area_size / 4
     ):
         super().__init__(node_dim, edge_dim, n_agents, subgoal_dim)
         self.area_size = area_size
         self.subgoal_dim = subgoal_dim
+        self.use_relative_subgoal = use_relative_subgoal
+        self.max_delta = max_delta if max_delta is not None else area_size / 4
         self.gnn_out_dim = gnn_out_dim
         self.use_rnn = use_rnn
         
@@ -277,36 +281,61 @@ class SubgoalPolicy(MultiAgentPolicy):
         else:
             return jnp.zeros((self.gnn_out_dim,))
 
-    def _transform_to_subgoal(self, action_tanh: Array) -> Array:
+    def _transform_to_subgoal(self, action_tanh: Array, current_pos: Array = None) -> Array:
         """
-        将 tanh 输出 [-1, 1] 转换为绝对坐标 [0, area_size]
-        
-        Args:
-            action_tanh: (n_agents, 2) in [-1, 1]
-        
-        Returns:
-            subgoal: (n_agents, 2) in [0, area_size]
-        """
-        return (action_tanh + 1.0) / 2.0 * self.area_size
+        将 tanh 输出 [-1, 1] 转换为 subgoal 坐标
 
-    def _transform_from_subgoal(self, subgoal: Array) -> Array:
+        Args:
+            action_tanh: (n_agents, 2) in [-1, 1]
+            current_pos: (n_agents, 2) 当前位置，仅在相对模式下使用
+
+        Returns:
+            subgoal: (n_agents, 2) in [0, area_size]
         """
-        反向变换：从 [0, area_size] 到 [-1, 1]
+        if self.use_relative_subgoal:
+            # 相对模式: tanh [-1, 1] → delta [-max_delta, max_delta]
+            # subgoal = current_pos + delta
+            delta = action_tanh * self.max_delta
+            subgoal = current_pos + delta
+            # 裁剪到地图范围
+            subgoal = jnp.clip(subgoal, 0, self.area_size)
+        else:
+            # 绝对模式（原来的方式）: tanh [-1, 1] → [0, area_size]
+            subgoal = (action_tanh + 1.0) / 2.0 * self.area_size
+        return subgoal
+
+    def _transform_from_subgoal(self, subgoal: Array, current_pos: Array = None) -> Array:
+        """
+        反向变换：从 subgoal 坐标到 [-1, 1]
         用于 eval_action
-        
+
         Args:
             subgoal: (n_agents, 2) in [0, area_size]
-        
+            current_pos: (n_agents, 2) 当前位置，仅在相对模式下使用
+
         Returns:
             action_tanh: (n_agents, 2) in [-1, 1]
         """
-        return subgoal / self.area_size * 2.0 - 1.0
+        if self.use_relative_subgoal:
+            # 相对模式: delta = subgoal - current_pos → tanh = delta / max_delta
+            delta = subgoal - current_pos
+            action_tanh = delta / self.max_delta
+            action_tanh = jnp.clip(action_tanh, -1, 1)
+        else:
+            # 绝对模式（原来的方式）
+            action_tanh = subgoal / self.area_size * 2.0 - 1.0
+        return action_tanh
+
+    def _get_current_pos(self, obs: GraphsTuple) -> Array:
+        """从 obs 中提取当前 agent 位置"""
+        return obs.type_states(type_idx=0, n_type=self.n_agents)[:, :2]  # (n_agents, 2)
 
     def get_action(self, params: Params, obs: GraphsTuple, rnn_state: Array) -> [Action, Array]:
-        """返回 subgoal: (n_agents, 2) - [x, y] 绝对坐标"""
+        """返回 subgoal: (n_agents, 2) - [x, y] 坐标"""
         dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
         action_tanh = dist.mode()  # (n_agents, 2) in [-1, 1]
-        subgoal = self._transform_to_subgoal(action_tanh)
+        current_pos = self._get_current_pos(obs) if self.use_relative_subgoal else None
+        subgoal = self._transform_to_subgoal(action_tanh, current_pos)
         return subgoal, rnn_state
 
     def sample_action(
@@ -316,7 +345,8 @@ class SubgoalPolicy(MultiAgentPolicy):
         dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
         action_tanh = dist.sample(seed=key)  # (n_agents, 2) in [-1, 1]
         log_prob = dist.log_prob(action_tanh)  # log_prob 是在 tanh 空间计算的
-        subgoal = self._transform_to_subgoal(action_tanh)
+        current_pos = self._get_current_pos(obs) if self.use_relative_subgoal else None
+        subgoal = self._transform_to_subgoal(action_tanh, current_pos)
         return subgoal, log_prob, rnn_state
 
     def eval_action(
@@ -324,13 +354,14 @@ class SubgoalPolicy(MultiAgentPolicy):
     ) -> Tuple[Array, Array, Array]:
         """
         评估给定 subgoal 的 log_prob 和 entropy
-        
+
         Args:
             action: subgoal in [0, area_size]
         """
         dist, rnn_state = self.dist.apply(params, obs, rnn_state, n_agents=self.n_agents)
         # 将 subgoal 转回 tanh 空间
-        action_tanh = self._transform_from_subgoal(action)
+        current_pos = self._get_current_pos(obs) if self.use_relative_subgoal else None
+        action_tanh = self._transform_from_subgoal(action, current_pos)
         log_prob = dist.log_prob(action_tanh)
         entropy = dist.entropy()
         return log_prob, entropy, rnn_state

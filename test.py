@@ -52,6 +52,7 @@ def test(args):
         num_obs=config.obs if args.obs is None else args.obs,
         max_step=args.max_step,
         full_observation=args.full_observation,
+        cbf_alpha=args.alpha,
     )
 
     # create algorithm
@@ -63,6 +64,14 @@ def test(args):
     else:
         step = args.step
     print("step: ", step)
+
+    # 从 config 读取 relative subgoal 参数，命令行可覆盖
+    use_relative_subgoal = getattr(config, 'use_relative_subgoal', False)
+    if args.relative_subgoal is not None:
+        use_relative_subgoal = args.relative_subgoal
+    max_delta = getattr(config, 'max_delta', None)
+    if args.max_delta is not None:
+        max_delta = args.max_delta
 
     algo = make_algo(
         algo=config.algo,
@@ -83,6 +92,8 @@ def test(args):
         use_rnn=config.use_rnn,
         rnn_layers=config.rnn_layers,
         use_lstm=config.use_lstm,
+        use_relative_subgoal=use_relative_subgoal,
+        max_delta=max_delta,
     )
     algo.load(model_path, step)
     if args.stochastic:
@@ -98,7 +109,7 @@ def test(args):
     # 初始化 CBF 并预热（触发 JIT 编译）
     if args.show_subgoal or config.algo == 'informarl_subgoal':
         import time
-        env.init_cbf()
+        env.init_cbf(use_adaptive=True, use_closed_form=True)
 
         # Warmup: 触发首次 JIT 编译
         print("Warming up CBF (JIT compiling)...")
@@ -123,7 +134,8 @@ def test(args):
                                 act_fn,
                                 init_rnn_state,
                                 stochastic=args.stochastic,
-                                subgoal_interval=args.subgoal_interval)
+                                subgoal_interval=args.subgoal_interval,
+                                use_cbf=True)
     else:
         rollout_fn = ft.partial(test_rollout,
                                 env,
@@ -204,11 +216,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_115153032_JEKY")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_120233529_KPJF")
 
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=2)
+    parser.add_argument("--epi", type=int, default=10)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -221,6 +233,13 @@ def main():
                         help="Show subgoal markers in video (for hierarchical RL)")
     parser.add_argument("--subgoal-interval", type=int, default=8,
                         help="Subgoal interval for hierarchical RL")
+    parser.add_argument("--alpha", type=float, default=100.0,
+                        help="CBF alpha parameter (larger = more conservative)")
+
+    parser.add_argument("--relative-subgoal", action="store_true", default=True,
+                        help="Use relative subgoal (overrides config if set)")
+    parser.add_argument("--max-delta", type=float, default=0.2,
+                        help="Max delta for relative subgoal (overrides config if set)")
 
     # default arguments
     parser.add_argument("-n", "--num-agents", type=int, default=None)

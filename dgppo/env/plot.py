@@ -540,13 +540,47 @@ def render_lidar(
     # plot subgoals (if enabled)
     subgoal_markers = []
     subgoal_lines = []  # lines from agent to subgoal
+    subgoal_history_markers = []  # list of lists: [agent_idx][history_idx] = marker
+    subgoal_history_lines = []  # list of lists: [agent_idx][line_idx] = line between subgoals
+    subgoal_history = []  # list of lists: [agent_idx] = list of (timestep, pos) tuples
+
     if show_subgoal and dim == 2:
         # rollout.actions contains subgoals: (T, n_agent, 2)
         subgoal_pos_0 = np.array(rollout.actions[0, :, :2])  # (n_agent, 2)
         agent_pos_0 = np.array(graph0.states[:n_agent, :2])
 
+        # Pre-collect all subgoal positions at each interval for history
+        total_steps = len(rollout.actions)
         for ii in range(n_agent):
-            # subgoal marker (star)
+            subgoal_history.append([])
+            subgoal_history_markers.append([])
+            subgoal_history_lines.append([])
+
+        # Collect subgoals at each interval boundary
+        for t in range(0, total_steps, subgoal_interval):
+            for ii in range(n_agent):
+                pos = np.array(rollout.actions[t, ii, :2])
+                subgoal_history[ii].append((t, pos))
+
+        # Create markers for historical subgoals (initially hidden)
+        max_history_per_agent = len(subgoal_history[0]) if subgoal_history else 0
+        for ii in range(n_agent):
+            for hist_idx in range(max_history_per_agent):
+                # Create marker but initially invisible
+                marker, = ax.plot([], [],
+                                marker='*', markersize=12, color=subgoal_color,
+                                markeredgecolor='black', markeredgewidth=0.5,
+                                alpha=0, zorder=5)  # alpha=0 means invisible
+                subgoal_history_markers[ii].append(marker)
+
+            # Create lines between consecutive subgoals (one less than markers)
+            for line_idx in range(max(0, max_history_per_agent - 1)):
+                line, = ax.plot([], [], '-', color=subgoal_color, linewidth=1.5,
+                               alpha=0, zorder=4)  # initially invisible
+                subgoal_history_lines[ii].append(line)
+
+        for ii in range(n_agent):
+            # current subgoal marker (star) - brighter and larger
             marker, = ax.plot(subgoal_pos_0[ii, 0], subgoal_pos_0[ii, 1],
                             marker='*', markersize=15, color=subgoal_color,
                             markeredgecolor='black', markeredgewidth=1, zorder=8)
@@ -658,10 +692,17 @@ def render_lidar(
         else:
             Vh_text = ax.text2D(0.99, 0.99, "Vh: []", va="top", ha="right", **text_font_opts)
 
+    # Flatten history markers and lines for init_fn
+    all_history_markers = []
+    all_history_lines = []
+    for ii in range(n_agent):
+        all_history_markers.extend(subgoal_history_markers[ii] if ii < len(subgoal_history_markers) else [])
+        all_history_lines.extend(subgoal_history_lines[ii] if ii < len(subgoal_history_lines) else [])
+
     # init function for animation
     def init_fn() -> list[plt.Artist]:
         return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col, kk_text,
-                *subgoal_markers, *subgoal_lines]
+                *subgoal_markers, *subgoal_lines, *all_history_markers, *all_history_lines]
 
     # update function for animation
     def update(kk: int) -> list[plt.Artist]:
@@ -682,8 +723,58 @@ def render_lidar(
         if show_subgoal and dim == 2:
             subgoal_pos_t = np.array(rollout.actions[kk, :, :2])
             agent_pos_t = np.array(graph.states[:n_agent, :2])
+
+            # Update historical subgoal markers with fading effect
             for ii in range(n_agent):
-                # update subgoal marker position
+                for hist_idx, (hist_t, hist_pos) in enumerate(subgoal_history[ii]):
+                    if hist_t <= kk:
+                        # Calculate alpha based on how old the subgoal is
+                        # More recent subgoals are more visible
+                        age = kk - hist_t  # how many timesteps ago
+                        max_age = kk  # normalize by current time
+                        if max_age > 0:
+                            # Alpha ranges from 0.15 (oldest) to 0.8 (most recent past subgoal)
+                            alpha = max(0.15, 0.8 - 0.6 * (age / max(max_age, 1)))
+                        else:
+                            alpha = 0.8
+
+                        # Don't show if it's the current subgoal interval (avoid duplicate)
+                        current_interval_start = (kk // subgoal_interval) * subgoal_interval
+                        if hist_t == current_interval_start:
+                            alpha = 0  # Hide, current subgoal will be shown separately
+
+                        subgoal_history_markers[ii][hist_idx].set_data([hist_pos[0]], [hist_pos[1]])
+                        subgoal_history_markers[ii][hist_idx].set_alpha(alpha)
+                    else:
+                        # Future subgoals should be invisible
+                        subgoal_history_markers[ii][hist_idx].set_alpha(0)
+
+                # Update lines between consecutive historical subgoals
+                for line_idx in range(len(subgoal_history_lines[ii])):
+                    # Line connects subgoal[line_idx] to subgoal[line_idx+1]
+                    if line_idx + 1 < len(subgoal_history[ii]):
+                        t1, pos1 = subgoal_history[ii][line_idx]
+                        t2, pos2 = subgoal_history[ii][line_idx + 1]
+
+                        # Only show line if the second subgoal has been reached
+                        if t2 <= kk:
+                            # Alpha based on the older (first) subgoal's age
+                            age = kk - t1
+                            max_age = kk
+                            if max_age > 0:
+                                line_alpha = max(0.1, 0.7 - 0.5 * (age / max(max_age, 1)))
+                            else:
+                                line_alpha = 0.7
+
+                            subgoal_history_lines[ii][line_idx].set_data(
+                                [pos1[0], pos2[0]], [pos1[1], pos2[1]])
+                            subgoal_history_lines[ii][line_idx].set_alpha(line_alpha)
+                        else:
+                            # Future lines should be invisible
+                            subgoal_history_lines[ii][line_idx].set_alpha(0)
+
+            for ii in range(n_agent):
+                # update current subgoal marker position (full opacity)
                 subgoal_markers[ii].set_data([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]])
                 # update line from agent to subgoal
                 subgoal_lines[ii].set_data([agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
@@ -750,7 +841,7 @@ def render_lidar(
         kk_text.set_text("kk={:04}".format(kk))
 
         return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, *cnt_col_t, kk_text,
-                *subgoal_markers, *subgoal_lines]
+                *subgoal_markers, *subgoal_lines, *all_history_markers, *all_history_lines]
 
     fps = 30.0
     spf = 1 / fps

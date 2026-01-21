@@ -369,36 +369,28 @@ class LidarEnv(MultiAgentEnv, ABC):
         return self.clip_action(error @ self._K.T)
 
 
-    def init_cbf(self, use_adaptive: bool = True, use_closed_form: bool = False):
+    def init_cbf(self, use_adaptive: bool = True):
         """初始化 CBF 函数和 JIT 编译 - 必须在使用前调用
 
         Args:
             use_adaptive: 是否使用自适应模式（每个 timestep 根据 agent 间距离动态选择），默认 True
-            use_closed_form: 是否使用闭式解（极快，无QP求解），默认 False
 
         Note:
             - 自适应模式：agent 间最小距离 < cbf_comm_radius 时用 CBF，否则用纯 u_ref
-            - 闭式解模式：用投影法替代 QP 求解，速度快 10-50x，精度略有损失
+            - 非自适应模式：总是使用 CBF
         """
         if self._cbf is None:
             print("Initializing CBF function...")
             self._cbf = get_pwise_cbf_fn(self, self.k)
 
         if self._safe_u_ref_jit is None:
-            if use_closed_form:
-                print("JIT compiling safe_u_ref with CLOSED-FORM solver (fast mode)...")
-                if use_adaptive:
-                    self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl_closed_form)
-                else:
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl_closed_form)
+            if use_adaptive:
+                cbf_comm_radius = self._params["cbf_comm_radius"]
+                print(f"JIT compiling adaptive_safe_u_ref (cbf_comm_radius={cbf_comm_radius})...")
+                self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl)
             else:
-                if use_adaptive:
-                    cbf_comm_radius = self._params["cbf_comm_radius"]
-                    print(f"JIT compiling adaptive_safe_u_ref with QP solver (cbf_comm_radius={cbf_comm_radius})...")
-                    self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl)
-                else:
-                    print("JIT compiling safe_u_ref with QP solver...")
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl)
+                print("JIT compiling safe_u_ref (always use CBF)...")
+                self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl)
 
         if self._u_ref_only_jit is None:
             print("JIT compiling u_ref_only...")
@@ -482,7 +474,7 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
         settings = JaxProxQP.Settings.default()
-        settings.max_iter = 4
+        settings.max_iter = 3
 
         settings.dua_gap_thresh_abs = None
         solver = JaxProxQP(qp, settings)
@@ -491,96 +483,6 @@ class LidarEnv(MultiAgentEnv, ABC):
         u_opt, r = sol.x[: self.action_dim], sol.x[-self.k :]
 
         return u_opt, r
-
-    def _solve_cbf_closed_form(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float):
-        """闭式 CBF 过滤（无 QP 求解器，极快）
-
-        CBF 约束: Lg_h @ u + Lf_h + α*h >= 0
-        即: a @ u >= b, 其中 a = Lg_h, b = -Lf_h - α*h
-
-        若违反，投影到约束边界: u_safe = u_ref + λ * a^T
-        其中 λ = (b - a @ u_ref) / ||a||²
-        """
-        u_lb, u_ub = self.action_lim()
-
-        # CBF 约束: Lg_h @ u >= -Lf_h - α*h (考虑责任系数)
-        # k_margin[i] > 0 表示约束 i 满足
-        k_b = -k_responsibility * (k_Lf_h + self.cbf_alpha * k_h)  # (k,)
-        k_margin = (k_Lg_h @ u_ref) - k_b  # (k,)
-
-        # 迭代处理每个违反的约束（最多 k 次）
-        u_safe = u_ref
-
-        def project_single_constraint(u_current, constraint_idx):
-            """将 u 投影到单个约束边界"""
-            a = k_Lg_h[constraint_idx]  # (nu,)
-            b = k_b[constraint_idx]      # scalar
-
-            margin = a @ u_current - b
-            a_norm_sq = (a ** 2).sum() + 1e-8
-
-            # 只在违反时修正 (margin < 0)
-            lambda_proj = jnp.maximum(0, -margin / a_norm_sq)
-            u_new = u_current + lambda_proj * a
-
-            return jnp.clip(u_new, u_lb, u_ub)
-
-        # 按违反程度排序，优先处理最严重的
-        sorted_idx = jnp.argsort(k_margin)  # 最小（最违反）在前
-
-        # 顺序投影（简单有效）
-        def body_fn(i, u):
-            idx = sorted_idx[i]
-            return project_single_constraint(u, idx)
-
-        u_safe = jax.lax.fori_loop(0, self.k, body_fn, u_safe)
-
-        # 计算松弛量（用于兼容原接口）
-        k_margin_final = (k_Lg_h @ u_safe) - k_b
-        r = jnp.maximum(0, -k_margin_final)
-
-        return u_safe, r
-
-    def get_qp_action_closed_form(self, graph: GraphsTuple, u_ref: Action) -> tuple[Action, Array]:
-        """使用闭式解的安全动作（替代 get_qp_action）"""
-        agent_node_mask = graph.node_type == 0
-        agent_node_id = mask2index(agent_node_mask, self.num_agents)
-
-        def h_aug(new_agent_state: State) -> tuple[Array, Array]:
-            new_state = graph.states.at[agent_node_id].set(new_agent_state)
-            new_graph = graph._replace(edges=new_state[graph.receivers] - new_state[graph.senders], states=new_state)
-            ak_h_, ak_isobs_ = self.get_cbf(new_graph)
-            return ak_h_, ak_isobs_
-
-        def h(new_agent_state: State) -> Array:
-            return h_aug(new_agent_state)[0]
-
-        agent_state = graph.type_states(type_idx=0, n_type=self.num_agents)
-        ak_h, ak_isobs = h_aug(agent_state)
-        ak_hx = jax.jacfwd(h)(agent_state)
-
-        a_dyn_f, a_dyn_g = self.control_affine_dyn(agent_state)
-        ak_Lf_h = ei.einsum(ak_hx, a_dyn_f, "agent_i k agent_j nx, agent_j nx -> agent_i k")
-        aka_Lg_h: Array = ei.einsum(ak_hx, a_dyn_g, "agent_i k agent_j nx, agent_j nx nu -> agent_i k agent_j nu")
-
-        def index_fn(idx: int):
-            k_Lg_h = aka_Lg_h[idx, :, idx]
-            return k_Lg_h
-
-        ak_Lg_h_self = jax_vmap(index_fn)(jnp.arange(self.num_agents))
-        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
-
-        # 使用闭式解
-        au_opt, ar = jax_vmap(self._solve_cbf_closed_form)(
-            ak_h, ak_Lf_h, ak_Lg_h_self, u_ref, ak_resp
-        )
-        return au_opt, ar
-
-    def _safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """使用闭式解的 safe_u_ref"""
-        nominal_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-        action, _ = self.get_qp_action_closed_form(graph, u_ref=nominal_action)
-        return action
 
     def _safe_u_ref_impl(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
         """safe_u_ref 的内部实现（会被 JIT 编译）"""
@@ -654,23 +556,6 @@ class LidarEnv(MultiAgentEnv, ABC):
         safe_action = self._safe_u_ref_impl(graph, target_pos, is_final_goal)  # (n_agent, action_dim)
 
         # 每个 agent 单独选择
-        return jnp.where(use_cbf_per_agent[:, None], safe_action, u_ref_action)
-
-    def _adaptive_safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """自适应安全控制器（闭式解版本）"""
-        cbf_comm_radius = self._params["cbf_comm_radius"]
-
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6
-        min_dist_per_agent = agent_dist.min(axis=1)
-
-        use_cbf_per_agent = min_dist_per_agent < cbf_comm_radius
-
-        u_ref_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-        safe_action = self._safe_u_ref_impl_closed_form(graph, target_pos, is_final_goal)
-
         return jnp.where(use_cbf_per_agent[:, None], safe_action, u_ref_action)
 
     def safe_u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
