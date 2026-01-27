@@ -216,11 +216,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_120233529_KPJF")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_126170027_RELH")
 
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=10)
+    parser.add_argument("--epi", type=int, default=100)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -233,7 +233,7 @@ def main():
                         help="Show subgoal markers in video (for hierarchical RL)")
     parser.add_argument("--subgoal-interval", type=int, default=8,
                         help="Subgoal interval for hierarchical RL")
-    parser.add_argument("--alpha", type=float, default=100.0,
+    parser.add_argument("--alpha", type=float, default=50.0,
                         help="CBF alpha parameter (larger = more conservative)")
 
     parser.add_argument("--relative-subgoal", action="store_true", default=True,
@@ -242,7 +242,7 @@ def main():
                         help="Max delta for relative subgoal (overrides config if set)")
 
     # default arguments
-    parser.add_argument("-n", "--num-agents", type=int, default=None)
+    parser.add_argument("-n", "--num-agents", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--env", type=str, default=None)
     parser.add_argument("--offset", type=int, default=0)

@@ -24,7 +24,9 @@ GOAL_REWARD_COEF = 0.2          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
 SUBGOAL_BONUS_COEF = 0.02       # subgoal_bonus 系数
-DIST_TO_GOAL_COEF = 0.05        # dist_agent_to_goal 系数
+DIST_TO_GOAL_COEF = 0.01        # dist_agent_to_goal 系数
+
+SUBGOAL_SHADOW_COEF = 3       # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）
 # ===================================================================
 
 
@@ -125,7 +127,12 @@ def rollout_hierarchical(
         # 3. agent 距离 goal 的 dense reward
         dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
 
-        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal
+        # 4. subgoal 阴影区惩罚（subgoal在障碍物后方）
+        # 使用当前graph（生成subgoal时的状态）来判断
+        shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)  # (n_agents,), -1或0
+        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF  # 负值惩罚
+
+        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
         
         # === 只在高层决策点保存数据 ===
         # 用一个mask标记哪些timestep需要保存
@@ -347,7 +354,11 @@ def test_rollout_subgoal(
         # 3. agent 距离 goal 的 dense reward
         dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
 
-        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal
+        # 4. subgoal 阴影区惩罚（与训练时一致）
+        shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)  # (n_agents,), -1或0
+        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+
+        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
 
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1), (
             graph,

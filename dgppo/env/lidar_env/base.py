@@ -239,6 +239,80 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         return cost
 
+    def get_subgoal_shadow_cost(self, graph: GraphsTuple, subgoal_pos: Array) -> Array:
+        """
+        检查subgoal是否落在LiDAR射线的阴影区（障碍物后方）
+
+        原理：LiDAR只能看到障碍物面向agent的一面，障碍物后方是未知的危险区域。
+        如果subgoal落在某条LiDAR射线的延长线上（锥形区域内）且距离超过LiDAR击中点，
+        则认为subgoal可能在障碍物内部。
+
+        Parameters
+        ----------
+        graph: GraphsTuple, 当前环境状态
+        subgoal_pos: Array, shape (n_agents, 2), 每个agent的subgoal位置
+
+        Returns
+        -------
+        cost: Array, shape (n_agents,), 每个agent的subgoal shadow cost
+              -1 表示危险（subgoal在阴影区）
+              0 表示安全
+        """
+        n_agents = self.num_agents
+        # print("[DEBUG] LidarEnv.get_subgoal_shadow_cost called")  # 取消注释来调试
+
+        # 如果没有障碍物，直接返回0
+        if self.params['n_obs'] == 0:
+            return jnp.zeros(n_agents)
+
+        # 获取agent位置
+        agent_pos = graph.type_states(type_idx=0, n_type=n_agents)[:, :2]  # (n_agents, 2)
+
+        # 获取LiDAR击中点
+        n_rays = self._params["top_k_rays"]
+        obs_pos = graph.type_states(type_idx=2, n_type=n_rays * n_agents)[:, :2]
+        obs_pos = jnp.reshape(obs_pos, (n_agents, n_rays, 2))  # (n_agents, n_rays, 2)
+
+        # 锥形角度: θ = 360° / n_rays / 2 (弧度)
+        theta = jnp.pi / self._params["n_rays"]  # 360° / n_rays / 2 = π / n_rays
+
+        def check_single_agent(agent_p, subgoal_p, lidar_points):
+            """检查单个agent的subgoal是否在阴影区"""
+            # agent_p: (2,), subgoal_p: (2,), lidar_points: (n_rays, 2)
+
+            # 计算agent到每个lidar点的方向和距离
+            dir_to_lidar = lidar_points - agent_p  # (n_rays, 2)
+            dist_to_lidar = jnp.linalg.norm(dir_to_lidar, axis=-1)  # (n_rays,)
+            dir_to_lidar_norm = dir_to_lidar / (dist_to_lidar[:, None] + 1e-8)  # (n_rays, 2)
+
+            # 计算agent到subgoal的方向和距离
+            dir_to_subgoal = subgoal_p - agent_p  # (2,)
+            dist_to_subgoal = jnp.linalg.norm(dir_to_subgoal)  # scalar
+            dir_to_subgoal_norm = dir_to_subgoal / (dist_to_subgoal + 1e-8)  # (2,)
+
+            # 计算每条lidar射线与subgoal方向的夹角
+            # cos(angle) = dot(dir_lidar, dir_subgoal)
+            cos_angles = jnp.sum(dir_to_lidar_norm * dir_to_subgoal_norm, axis=-1)  # (n_rays,)
+            cos_angles = jnp.clip(cos_angles, -1.0, 1.0)
+            angles = jnp.arccos(cos_angles)  # (n_rays,)
+
+            # 判断条件：
+            # 1. 夹角 < θ（在锥形区域内）
+            # 2. subgoal距离 > lidar点距离 + car_radius（在阴影区，考虑agent半径作为安全边距）
+            car_radius = self.params["car_radius"]
+            in_cone = angles < theta
+            in_shadow = dist_to_subgoal > (dist_to_lidar + car_radius)
+
+            # 任一lidar射线满足条件则危险
+            is_dangerous = jnp.any(in_cone & in_shadow)
+
+            return jnp.where(is_dangerous, -1.0, 0.0)
+
+        # 对所有agent进行检查
+        costs = jax_vmap(check_single_agent)(agent_pos, subgoal_pos, obs_pos)
+
+        return costs
+
     def render_video(
             self,
             rollout: Rollout,
@@ -357,7 +431,7 @@ class LidarEnv(MultiAgentEnv, ABC):
                 is_final_goal,
                 # jnp.zeros_like(desired_vel),  # 最终目标：速度为0
                 # desired_vel                    # 中间subgoal：保持速度
-                direction_unit * jnp.clip(dist * 5.0, 0.0, max_vel * 0.5),  # 最终目标：根据距离平滑减速到0                                                                  
+                direction_unit * jnp.clip(dist * 0.0, 0.0, max_vel * 0.0),  # 最终目标：根据距离平滑减速到0                                                                  
                 desired_vel                                                  # 中间subgoal：保持速度  
             )
             goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
@@ -368,6 +442,56 @@ class LidarEnv(MultiAgentEnv, ABC):
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
 
+    def u_ref_2(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
+        """
+        改进版u_ref：当subgoal接近真实goal时自动减速，避免CBF和u_ref打架
+        """
+        agent = graph.type_states(type_idx=0, n_type=self.num_agents)
+        real_goal = graph.type_states(type_idx=1, n_type=self.num_agents)
+
+        if target_pos is None:
+            goal = real_goal
+        else:
+            goal_pos = target_pos
+            agent_pos = agent[:, :2]
+            real_goal_pos = real_goal[:, :2]
+
+            # 计算agent到subgoal的方向和距离
+            direction = goal_pos - agent_pos
+            dist = jnp.linalg.norm(direction, axis=-1, keepdims=True)
+            direction_unit = jnp.where(dist > 1e-6, direction / dist, 0.0)
+
+            # 计算subgoal到真实goal的距离
+            dist_subgoal_to_real_goal = jnp.linalg.norm(goal_pos - real_goal_pos, axis=-1, keepdims=True)
+
+            # 速度参数
+            max_vel = 0.7
+            cruise_speed = max_vel * 0.01
+            approach_dist = 0.05
+
+            # 普通subgoal的速度
+            normal_speed = jnp.where(
+                dist > approach_dist,
+                max_vel * 0.8,
+                cruise_speed
+            )
+            normal_vel = direction_unit * normal_speed
+
+            # 接近真实goal时的减速方案
+            slow_speed = jnp.clip(dist * 1.0, 0.0, max_vel * 0.2)
+            slow_vel = direction_unit * slow_speed
+
+            # 判断是否需要减速：is_final_goal 或 subgoal距离真实goal很近
+            near_real_goal_thresh = 0.2
+            should_slow_down = is_final_goal | (dist_subgoal_to_real_goal < near_real_goal_thresh)
+
+            desired_vel = jnp.where(should_slow_down, slow_vel, normal_vel)
+            goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
+
+        error = goal - agent
+        error_max = jnp.abs(error / jnp.linalg.norm(error, axis=-1, keepdims=True) * self._params["comm_radius"])
+        error = jnp.clip(error, -error_max, error_max)
+        return self.clip_action(error @ self._K.T)
 
     def init_cbf(self, use_adaptive: bool = True, use_closed_form: bool = False):
         """初始化 CBF 函数和 JIT 编译 - 必须在使用前调用

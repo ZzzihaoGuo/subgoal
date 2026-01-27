@@ -188,7 +188,7 @@ def main():
 
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--steps", type=int, default=300000)
+    parser.add_argument("--steps", type=int, default=400000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cost-weight", type=float, default=0.)
@@ -223,7 +223,7 @@ def main():
     parser.add_argument("--rnn-step", type=int, default=1)
 
     # default arguments
-    parser.add_argument("--n-env-train", type=int, default=1024) 
+    parser.add_argument("--n-env-train", type=int, default=2048) 
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")

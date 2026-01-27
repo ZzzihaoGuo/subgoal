@@ -148,3 +148,21 @@ class MultiAgentEnv(ABC):
             **kwargs
     ) -> None:
         pass
+
+    def get_subgoal_shadow_cost(self, graph: GraphsTuple, subgoal_pos: Array) -> Array:
+        """
+        检查subgoal是否在障碍物阴影区（默认实现：返回0，表示安全）
+
+        子类（如LidarEnv）可以重写此方法来实现具体的检查逻辑。
+
+        Parameters
+        ----------
+        graph: GraphsTuple, 当前环境状态
+        subgoal_pos: Array, shape (n_agents, 2), 每个agent的subgoal位置
+
+        Returns
+        -------
+        cost: Array, shape (n_agents,), 每个agent的subgoal shadow cost
+              -1 表示危险, 0 表示安全
+        """
+        return jnp.zeros(self.num_agents)
