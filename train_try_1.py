@@ -150,8 +150,21 @@ def train(args):
     # 1. 初始化 CBF 函数和 JIT 编译
     # use_closed_form=True: 闭式解（快 10-50x）
     # use_closed_form=False: QP求解（更精确）
-    env.init_cbf(use_adaptive=True, use_closed_form=True)
-    env_test.init_cbf(use_adaptive=True, use_closed_form=True)
+    # use_paper_cbf=True: 使用论文中的 relative-degree-2 CBF
+    env.init_cbf(
+        use_adaptive=args.use_cbf_adaptive,
+        use_closed_form=args.use_cbf_closed_form,
+        use_paper_cbf=args.use_paper_cbf,
+        cbf_alpha1=args.cbf_alpha1,
+        cbf_alpha2=args.cbf_alpha2
+    )
+    env_test.init_cbf(
+        use_adaptive=args.use_cbf_adaptive,
+        use_closed_form=args.use_cbf_closed_form,
+        use_paper_cbf=args.use_paper_cbf,
+        cbf_alpha1=args.cbf_alpha1,
+        cbf_alpha2=args.cbf_alpha2
+    )
 
     # 2. 预热 safe_u_ref（触发首次 JIT 编译）
     print("Warming up CBF controller (first JIT compile)...")
@@ -204,6 +217,18 @@ def main():
     parser.add_argument("--cost-schedule", action="store_true", default=False)
     parser.add_argument("--no-rnn", action="store_true", default=True)
 
+    # CBF solver arguments
+    parser.add_argument("--use-paper-cbf", action="store_true", default=True,
+                        help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
+    parser.add_argument("--cbf-alpha1", type=float, default=1.0,
+                        help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--cbf-alpha2", type=float, default=1.0,
+                        help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
+                        help="Use closed-form CBF solver (10-50x faster than QP)")
+    parser.add_argument("--use-cbf-adaptive", action="store_true", default=False,
+                        help="Only use CBF when agents are within cbf_comm_radius")
+
     # Subgoal mode arguments
     parser.add_argument("--relative-subgoal", action="store_true", default=True,
                         help="Use relative subgoal (delta from current pos) instead of absolute coordinates")
@@ -223,7 +248,7 @@ def main():
     parser.add_argument("--rnn-step", type=int, default=1)
 
     # default arguments
-    parser.add_argument("--n-env-train", type=int, default=2048) 
+    parser.add_argument("--n-env-train", type=int, default=20) 
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--n-env-test", type=int, default=32)
     parser.add_argument("--log-dir", type=str, default="./logs")

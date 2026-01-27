@@ -157,6 +157,18 @@ def main():
     parser.add_argument("--cost-schedule", action="store_true", default=False)
     parser.add_argument("--no-rnn", action="store_true", default=False)
 
+    # CBF solver arguments
+    parser.add_argument("--use-paper-cbf", action="store_true", default=False,
+                        help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
+    parser.add_argument("--cbf-alpha1", type=float, default=1.0,
+                        help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--cbf-alpha2", type=float, default=1.0,
+                        help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
+                        help="Use closed-form CBF solver (10-50x faster than QP)")
+    parser.add_argument("--use-cbf-adaptive", action="store_true", default=True,
+                        help="Only use CBF when agents are within cbf_comm_radius")
+
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
     parser.add_argument("--Vl-gnn-layers", type=int, default=2)

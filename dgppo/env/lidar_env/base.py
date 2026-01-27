@@ -20,7 +20,7 @@ from ..base import MultiAgentEnv
 from dgppo.env.obstacle import Obstacle, Rectangle
 from dgppo.env.plot import render_lidar
 from dgppo.env.utils import get_lidar, lqr, get_node_goal_rng
-from dgppo.algo.utils import get_pwise_cbf_fn
+from dgppo.algo.utils import get_pwise_cbf_fn, get_pwise_cbf_paper_fn
 
 
 class LidarEnvState(NamedTuple):
@@ -493,20 +493,30 @@ class LidarEnv(MultiAgentEnv, ABC):
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
 
-    def init_cbf(self, use_adaptive: bool = True, use_closed_form: bool = False):
+    def init_cbf(self, use_adaptive: bool = True, use_closed_form: bool = False, use_paper_cbf: bool = False, cbf_alpha1: float = 1.0, cbf_alpha2: float = 1.0):
         """初始化 CBF 函数和 JIT 编译 - 必须在使用前调用
 
         Args:
             use_adaptive: 是否使用自适应模式（每个 timestep 根据 agent 间距离动态选择），默认 True
             use_closed_form: 是否使用闭式解（极快，无QP求解），默认 False
+            use_paper_cbf: 是否使用论文中的 relative-degree-2 CBF，默认 False
+            cbf_alpha1: CBF 参数 α₁（仅当 use_paper_cbf=True 时使用）
+            cbf_alpha2: CBF 参数 α₂（仅当 use_paper_cbf=True 时使用）
 
         Note:
             - 自适应模式：agent 间最小距离 < cbf_comm_radius 时用 CBF，否则用纯 u_ref
             - 闭式解模式：用投影法替代 QP 求解，速度快 10-50x，精度略有损失
+            - Paper CBF: 使用 relative-degree-2 CBF with conservative velocity approximation
         """
         if self._cbf is None:
-            print("Initializing CBF function...")
-            self._cbf = get_pwise_cbf_fn(self, self.k)
+            if use_paper_cbf:
+                print(f"Initializing PAPER CBF function (alpha1={cbf_alpha1}, alpha2={cbf_alpha2})...")
+                self._cbf = get_pwise_cbf_paper_fn(self, self.k, alpha1=cbf_alpha1, alpha2=cbf_alpha2)
+                self._cbf_type = "paper"  # 标记使用的 CBF 类型
+            else:
+                print("Initializing CBF function...")
+                self._cbf = get_pwise_cbf_fn(self, self.k)
+                self._cbf_type = "standard"
 
         if self._safe_u_ref_jit is None:
             if use_closed_form:
@@ -537,11 +547,19 @@ class LidarEnv(MultiAgentEnv, ABC):
     def get_cbf(self, graph: GraphsTuple) -> tuple[Array, Array]:
         """获取 CBF 值"""
         # 注意：self._cbf 必须在 JIT 之前初始化（调用 init_cbf）
-        ak_h0, ak_isobs = self._cbf(graph)
-        return ak_h0, ak_isobs
+        result = self._cbf(graph)
+        if len(result) == 3:  # Paper CBF returns (G, isobs, Gu)
+            return result[0], result[1]  # Return only G and isobs for backward compatibility
+        else:  # Standard CBF returns (h, isobs)
+            return result[0], result[1]
 
     def get_qp_action(self, graph: GraphsTuple, u_ref: Optional[Action] = None, relax_penalty: float = 1e3) -> [Action, Array]:
         """获取 QP 过滤后的安全动作"""
+        # Check if using paper CBF (which provides analytical Jacobian)
+        if hasattr(self, '_cbf_type') and self._cbf_type == "paper":
+            return self._get_qp_action_paper_cbf(graph, u_ref, relax_penalty)
+
+        # Standard CBF path (autodiff-based)
         agent_node_mask = graph.node_type == 0
         agent_node_id = mask2index(agent_node_mask, self.num_agents)
 
@@ -583,8 +601,29 @@ class LidarEnv(MultiAgentEnv, ABC):
         )
         return au_opt, ar
 
+    def _get_qp_action_paper_cbf(self, graph: GraphsTuple, u_ref: Optional[Action] = None, relax_penalty: float = 1e3) -> [Action, Array]:
+        """Paper CBF QP solver - uses pre-computed analytical Jacobian
+
+        Paper CBF returns: (G_base, isobs, Gu) where:
+        - G_base = ḧ(u=0) + α₂*ḣ + α₁*h (constraint value at u=0)
+        - Gu = ∂G/∂u = -2*p_rel (analytical Jacobian)
+
+        QP constraint becomes: G_base + Gu @ u >= 0
+        """
+        # Get paper CBF output with analytical Jacobian
+        ak_G_base, ak_isobs, ak_Gu = self._cbf(graph)
+
+        au_ref = u_ref
+        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
+
+        # Solve QP for each agent
+        au_opt, ar = jax_vmap(ft.partial(self._solve_qp_single_paper_cbf, relax_penalty=relax_penalty))(
+            ak_G_base, ak_Gu, au_ref, ak_resp
+        )
+        return au_opt, ar
+
     def _solve_qp_single(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float, relax_penalty: float = 1e3):
-        """单个 agent 的 QP 求解（JIT 兼容，无 assert）"""
+        """单个 agent 的 QP 求解（JIT 兼容，无 assert）- Standard CBF"""
         n_qp_x = self.action_dim + self.k
 
         u_lb, u_ub = self.action_lim()
@@ -616,8 +655,52 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         return u_opt, r
 
+    def _solve_qp_single_paper_cbf(self, k_G_base, k_Gu, u_ref, k_responsibility: float, relax_penalty: float = 1e3):
+        """单个 agent 的 QP 求解 - Paper CBF (relative-degree-2)
+
+        Paper CBF constraint: G_base + Gu @ u >= 0
+        where G_base = ḧ(u=0) + α₂*ḣ + α₁*h, Gu = ∂G/∂u
+
+        QP formulation:
+        min  0.5 * ||u - u_ref||^2 + penalty * ||r||^2
+        s.t. Gu @ u + r >= -G_base  (with responsibility weighting)
+             u_lb <= u <= u_ub
+             r >= 0
+        """
+        n_qp_x = self.action_dim + self.k
+        u_lb, u_ub = self.action_lim()
+
+        # Cost: minimize ||u - u_ref||^2 + penalty * ||r||^2
+        H = jnp.eye(n_qp_x, dtype=jnp.float32)
+        H = H.at[-self.k:, -self.k:].set(10.0)
+        g = jnp.concatenate([-u_ref, relax_penalty * jnp.ones(self.k)], axis=0)
+
+        # Constraint: -Gu @ u - r <= G_base * responsibility
+        # In QP form: C @ x <= b, where x = [u, r]
+        k_C = -jnp.concatenate([k_Gu, jnp.eye(self.k)], axis=1)  # (k, nu + k)
+        k_b = k_responsibility * k_G_base  # (k,)
+
+        # Box constraints
+        r_lb = jnp.full(self.k, 0.0, dtype=jnp.float32)
+        r_ub = jnp.full(self.k, jnp.inf, dtype=jnp.float32)
+        l_box = jnp.concatenate([u_lb, r_lb], axis=0)
+        u_box = jnp.concatenate([u_ub, r_ub], axis=0)
+
+        # Solve QP
+        qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
+        settings = JaxProxQP.Settings.default()
+        settings.max_iter = 4
+        settings.dua_gap_thresh_abs = None
+        solver = JaxProxQP(qp, settings)
+        sol = solver.solve()
+
+        u_opt = sol.x[:self.action_dim]
+        r = sol.x[-self.k:]
+
+        return u_opt, r
+
     def _solve_cbf_closed_form(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float):
-        """闭式 CBF 过滤（无 QP 求解器，极快）
+        """闭式 CBF 过滤（无 QP 求解器，极快）- Standard CBF
 
         CBF 约束: Lg_h @ u + Lf_h + α*h >= 0
         即: a @ u >= b, 其中 a = Lg_h, b = -Lf_h - α*h
@@ -665,8 +748,55 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         return u_safe, r
 
+    def _solve_cbf_closed_form_paper(self, k_G_base, k_Gu, u_ref, k_responsibility: float):
+        """闭式 CBF 过滤 - Paper CBF (relative-degree-2)
+
+        Paper CBF 约束: G_base + Gu @ u >= 0
+        即: a @ u >= b, 其中 a = Gu, b = -G_base
+
+        若违反，投影到约束边界: u_safe = u_ref + λ * a^T
+        其中 λ = (b - a @ u_ref) / ||a||²
+        """
+        u_lb, u_ub = self.action_lim()
+
+        # Paper CBF 约束: Gu @ u >= -G_base (考虑责任系数)
+        k_b = -k_responsibility * k_G_base  # (k,)
+        k_margin = (k_Gu @ u_ref) - k_b  # (k,)
+
+        u_safe = u_ref
+
+        def project_single_constraint(u_current, constraint_idx):
+            a = k_Gu[constraint_idx]  # (nu,)
+            b = k_b[constraint_idx]    # scalar
+
+            margin = a @ u_current - b
+            a_norm_sq = (a ** 2).sum() + 1e-8
+
+            lambda_proj = jnp.maximum(0, -margin / a_norm_sq)
+            u_new = u_current + lambda_proj * a
+
+            return jnp.clip(u_new, u_lb, u_ub)
+
+        sorted_idx = jnp.argsort(k_margin)
+
+        def body_fn(i, u):
+            idx = sorted_idx[i]
+            return project_single_constraint(u, idx)
+
+        u_safe = jax.lax.fori_loop(0, self.k, body_fn, u_safe)
+
+        k_margin_final = (k_Gu @ u_safe) - k_b
+        r = jnp.maximum(0, -k_margin_final)
+
+        return u_safe, r
+
     def get_qp_action_closed_form(self, graph: GraphsTuple, u_ref: Action) -> tuple[Action, Array]:
         """使用闭式解的安全动作（替代 get_qp_action）"""
+        # Check if using paper CBF
+        if hasattr(self, '_cbf_type') and self._cbf_type == "paper":
+            return self._get_qp_action_closed_form_paper_cbf(graph, u_ref)
+
+        # Standard CBF path
         agent_node_mask = graph.node_type == 0
         agent_node_id = mask2index(agent_node_mask, self.num_agents)
 
@@ -697,6 +827,16 @@ class LidarEnv(MultiAgentEnv, ABC):
         # 使用闭式解
         au_opt, ar = jax_vmap(self._solve_cbf_closed_form)(
             ak_h, ak_Lf_h, ak_Lg_h_self, u_ref, ak_resp
+        )
+        return au_opt, ar
+
+    def _get_qp_action_closed_form_paper_cbf(self, graph: GraphsTuple, u_ref: Action) -> tuple[Action, Array]:
+        """Paper CBF closed-form solver"""
+        ak_G_base, ak_isobs, ak_Gu = self._cbf(graph)
+        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
+
+        au_opt, ar = jax_vmap(self._solve_cbf_closed_form_paper)(
+            ak_G_base, ak_Gu, u_ref, ak_resp
         )
         return au_opt, ar
 
