@@ -83,7 +83,7 @@ def compute_dec_ocp_gae(
     
 
 def pwise_cbf_double_integrator_(state: Array, agent_idx: int, o_obs_state: Array, a_state: Array, r: float, k: int):
-    n_agent = len(a_state)inter
+    n_agent = len(a_state)
 
     pos = state[:2]
     all_obs_state = jnp.concatenate([a_state, o_obs_state], axis=0)
@@ -133,21 +133,71 @@ def get_pwise_cbf_fn(env: MultiAgentEnv, k: int = 3):
     n_rays = env.params["top_k_rays"]
     r = env.params["car_radius"]
     return ft.partial(pwise_cbf_double_integrator, r=r, n_agent=n_agent, n_rays=n_rays, k=k)
+
+
+def pwise_cbf_double_integrator_with_jacobian_(
+    state: Array, agent_idx: int, o_obs_state: Array, a_state: Array, r: float, k: int, cbf_alpha: float = 10.0
+):
+    """带解析雅可比矩阵的 CBF 计算（单个 agent）
+
+    h1 = h0_dot + alpha * h0
+    h0 = ||Δp||^2 - 4r^2
+    h0_dot = 2 * Δp · Δv
+
+    解析雅可比:
+    ∂h1/∂p = 2*alpha*Δp + 2*Δv
+    ∂h1/∂v = 2*Δp
+    """
+    n_agent = len(a_state)
+
+    pos = state[:2]
+    vel = state[2:]
+    all_obs_state = jnp.concatenate([a_state, o_obs_state], axis=0)
+    all_obs_pos = all_obs_state[:, :2]
+
+    # 计算到所有邻居的距离
+    o_dist_sq = ((pos - all_obs_pos) ** 2).sum(axis=-1)
+    o_dist_sq = o_dist_sq.at[agent_idx].set(1e2)  # 排除自己
+
+    # 取最近的 k 个
+    k_idx = jnp.argsort(o_dist_sq)[:k]
+    k_dist_sq = o_dist_sq[k_idx] - 4 * r ** 2
+
+    k_h0 = k_dist_sq
+
+    k_xdiff = state[:2] - all_obs_state[k_idx][:, :2]  # (k, 2)
+    k_vdiff = state[2:] - all_obs_state[k_idx][:, 2:]  # (k, 2)
+
+    k_h0_dot = 2 * (k_xdiff * k_vdiff).sum(axis=-1)
+    k_h1 = k_h0_dot + cbf_alpha * k_h0
+
+    k_isobs = k_idx >= n_agent
+
+    # 解析雅可比矩阵: ∂h1/∂state = [∂h1/∂p, ∂h1/∂v]
+    k_dh_dp = 2 * cbf_alpha * k_xdiff + 2 * k_vdiff  # (k, 2)
+    k_dh_dv = 2 * k_xdiff  # (k, 2)
+    k_hx = jnp.concatenate([k_dh_dp, k_dh_dv], axis=-1)  # (k, 4)
+
+    return k_h1, k_isobs, k_hx
+
+
+def pwise_cbf_double_integrator_with_jacobian(
+    graph: GraphsTuple, r: float, n_agent: int, n_rays: int, k: int, cbf_alpha: float = 10.0
+):
+    """带解析雅可比矩阵的 CBF 计算（所有 agent）"""
+    a_states = graph.type_states(type_idx=0, n_type=n_agent)
     obs_states = graph.type_states(type_idx=2, n_type=n_agent * n_rays)
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     agent_idx = jnp.arange(n_agent)
-    fn = jax.vmap(ft.partial(pwise_cbf_double_integrator_, r=r, k=k), in_axes=(0, 0, 0, None))
-    ak_h0, ak_isobs = fn(a_states, agent_idx, a_obs_states, a_states)
-    return ak_h0, ak_isobs
+    fn = jax.vmap(ft.partial(pwise_cbf_double_integrator_with_jacobian_, r=r, k=k, cbf_alpha=cbf_alpha), in_axes=(0, 0, 0, None))
+    ak_h, ak_isobs, ak_hx = fn(a_states, agent_idx, a_obs_states, a_states)
+    return ak_h, ak_isobs, ak_hx
 
 
-def get_pwise_cbf_fn(env: MultiAgentEnv, k: int = 3):
-    # TODO NEED TO ADD OTHER ENVS
+def get_pwise_cbf_with_jacobian_fn(env: MultiAgentEnv, k: int = 3, cbf_alpha: float = 10.0):
+    """获取带解析雅可比矩阵的 CBF 函数"""
     n_agent = env.num_agents
-    # 注意：graph里存的是top_k_rays个障碍物点，不是n_rays
     n_rays = env.params["top_k_rays"]
     r = env.params["car_radius"]
-    return ft.partial(pwise_cbf_double_integrator, r=r, n_agent=n_agent, n_rays=n_rays, k=k)
-
-
+    return ft.partial(pwise_cbf_double_integrator_with_jacobian, r=r, n_agent=n_agent, n_rays=n_rays, k=k, cbf_alpha=cbf_alpha)
