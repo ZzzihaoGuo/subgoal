@@ -37,7 +37,7 @@ def train(args):
         n_rays=args.n_rays,
         full_observation=args.full_observation,
         max_step=args.max_step,
-        cbf_alpha=args.alpha,
+        cbf_alpha=args.cbf_std_alpha2,
     )
     env_test = make_env(
         env_id=args.env,
@@ -46,7 +46,7 @@ def train(args):
         n_rays=args.n_rays,
         full_observation=args.full_observation,
         max_step=args.max_step,
-        cbf_alpha=args.alpha,
+        cbf_alpha=args.cbf_std_alpha2,
     )
 
     # create algorithm
@@ -71,7 +71,7 @@ def train(args):
         lr_Vl=args.lr_Vl,
         lr_Vh=args.lr_Vh,
         max_grad_norm=2.0,
-        alpha=args.alpha,
+        alpha=args.cbf_std_alpha2,
         cbf_eps=args.cbf_eps,
         seed=args.seed,
         batch_size=args.batch_size,
@@ -150,8 +150,21 @@ def train(args):
     # 1. 初始化 CBF 函数和 JIT 编译
     # use_closed_form=True: 闭式解（快 10-50x）
     # use_closed_form=False: QP求解（更精确）
-    env.init_cbf(use_adaptive=True, use_closed_form=True)
-    env_test.init_cbf(use_adaptive=True, use_closed_form=True)
+    # use_paper_cbf=True: 使用论文中的 relative-degree-2 CBF
+    env.init_cbf(
+        use_closed_form=args.use_cbf_closed_form,
+        use_paper_cbf=args.use_paper_cbf,
+        cbf_alpha1=args.cbf_alpha1,
+        cbf_alpha2=args.cbf_alpha2,
+        cbf_alpha=args.cbf_std_alpha1,
+    )
+    env_test.init_cbf(
+        use_closed_form=args.use_cbf_closed_form,
+        use_paper_cbf=args.use_paper_cbf,
+        cbf_alpha1=args.cbf_alpha1,
+        cbf_alpha2=args.cbf_alpha2,
+        cbf_alpha=args.cbf_std_alpha1,
+    )
 
     # 2. 预热 safe_u_ref（触发首次 JIT 编译）
     print("Warming up CBF controller (first JIT compile)...")
@@ -199,10 +212,23 @@ def main():
     parser.add_argument('--lr-lagr', type=float, default=1e-7)
     parser.add_argument("--cbf-weight", type=float, default=1.0)
     parser.add_argument("--cbf-eps", type=float, default=1e-2)
-    parser.add_argument("--alpha", type=float, default=50.0)
+    parser.add_argument("--cbf-std-alpha2", type=float, default=50.0,
+                        help="Standard CBF parameter α₂ (used in CBF solver constraint)")
     parser.add_argument("--no-cbf-schedule", action="store_true", default=False)
     parser.add_argument("--cost-schedule", action="store_true", default=False)
     parser.add_argument("--no-rnn", action="store_true", default=True)
+
+    # CBF solver arguments
+    parser.add_argument("--use-paper-cbf", action="store_true", default=True,
+                        help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
+    parser.add_argument("--cbf-alpha1", type=float, default=40.0,
+                        help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--cbf-alpha2", type=float, default=16.0,
+                        help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
+                        help="Use closed-form CBF solver (10-50x faster than QP)")
+    parser.add_argument("--cbf-std-alpha1", type=float, default=10.0,
+                        help="Standard CBF parameter α₁ (used in CBF value computation in utils.py)")
 
     # Subgoal mode arguments
     parser.add_argument("--relative-subgoal", action="store_true", default=True,
@@ -229,7 +255,7 @@ def main():
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-epi", type=int, default=1)
-    parser.add_argument("--save-interval", type=int, default=100)
+    parser.add_argument("--save-interval", type=int, default=1000)
 
     parser.add_argument("--subgoal-interval", type=int, default=8,
                     help="Hierarchical RL: steps between subgoal generation")

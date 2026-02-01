@@ -36,7 +36,7 @@ class DecShareCBF(Algorithm):
 
         self.cbf_alpha = alpha
         self.k = 3
-        self.cbf = get_pwise_cbf_fn(env, self.k)
+        self.cbf = get_pwise_cbf_fn(env, self.k, cbf_alpha=alpha)
 
     @property
     def config(self) -> dict:

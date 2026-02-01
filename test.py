@@ -52,7 +52,7 @@ def test(args):
         num_obs=config.obs if args.obs is None else args.obs,
         max_step=args.max_step,
         full_observation=args.full_observation,
-        cbf_alpha=args.alpha,
+        cbf_alpha=args.cbf_std_alpha2,
     )
 
     # create algorithm
@@ -109,7 +109,13 @@ def test(args):
     # 初始化 CBF 并预热（触发 JIT 编译）
     if args.show_subgoal or config.algo == 'informarl_subgoal':
         import time
-        env.init_cbf(use_adaptive=True, use_closed_form=True)
+        env.init_cbf(
+            use_closed_form=args.use_cbf_closed_form,
+            use_paper_cbf=args.use_paper_cbf,
+            cbf_alpha1=args.cbf_alpha1,
+            cbf_alpha2=args.cbf_alpha2,
+            cbf_alpha=args.cbf_std_alpha1,
+        )
 
         # Warmup: 触发首次 JIT 编译
         print("Warming up CBF (JIT compiling)...")
@@ -216,11 +222,11 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_126170027_RELH")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_131235404_HUMY")
 
     # custom arguments
-    parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=100)
+    parser.add_argument("--no-video", action="store_true", default=True)
+    parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -233,8 +239,20 @@ def main():
                         help="Show subgoal markers in video (for hierarchical RL)")
     parser.add_argument("--subgoal-interval", type=int, default=8,
                         help="Subgoal interval for hierarchical RL")
-    parser.add_argument("--alpha", type=float, default=50.0,
-                        help="CBF alpha parameter (larger = more conservative)")
+    parser.add_argument("--cbf-std-alpha1", type=float, default=40.0,
+                        help="Standard CBF parameter α₁ (used in CBF value computation in utils.py)")
+    parser.add_argument("--cbf-std-alpha2", type=float, default=16.0,
+                        help="Standard CBF parameter α₂ (used in CBF solver constraint)")
+
+    # CBF solver arguments (match train_try_1.py)
+    parser.add_argument("--use-paper-cbf", action="store_true", default=True,
+                        help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
+    parser.add_argument("--cbf-alpha1", type=float, default=40,
+                        help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--cbf-alpha2", type=float, default=16,
+                        help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
+    parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
+                        help="Use closed-form CBF solver (10-50x faster than QP)")
 
     parser.add_argument("--relative-subgoal", action="store_true", default=True,
                         help="Use relative subgoal (overrides config if set)")
@@ -242,7 +260,7 @@ def main():
                         help="Max delta for relative subgoal (overrides config if set)")
 
     # default arguments
-    parser.add_argument("-n", "--num-agents", type=int, default=5)
+    parser.add_argument("-n", "--num-agents", type=int, default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--env", type=str, default=None)
     parser.add_argument("--offset", type=int, default=0)

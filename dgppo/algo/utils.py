@@ -82,7 +82,7 @@ def compute_dec_ocp_gae(
     return assert_shape(Qhs_GAEs, (T, n_agent, nh)), assert_shape(Ql_GAEs, T)
     
 
-def pwise_cbf_double_integrator_(state: Array, agent_idx: int, o_obs_state: Array, a_state: Array, r: float, k: int):
+def pwise_cbf_double_integrator_(state: Array, agent_idx: int, o_obs_state: Array, a_state: Array, r: float, k: int, cbf_alpha: float = 10.0):
     n_agent = len(a_state)
 
     pos = state[:2]
@@ -97,7 +97,10 @@ def pwise_cbf_double_integrator_(state: Array, agent_idx: int, o_obs_state: Arra
     k_idx = jnp.argsort(o_dist_sq)[:k]
     k_dist_sq = o_dist_sq[k_idx]
     # Take radius into account.
-    k_dist_sq = k_dist_sq - 4 * r ** 2
+    # agent-agent: 4r² (sum of radii = 2r), agent-obstacle: r² (LiDAR point on surface)
+    k_isobs = k_idx >= n_agent
+    k_safety_dist_sq = jnp.where(k_isobs, r ** 2, 4 * r ** 2)
+    k_dist_sq = k_dist_sq - k_safety_dist_sq
 
     k_h0 = k_dist_sq
 
@@ -106,14 +109,12 @@ def pwise_cbf_double_integrator_(state: Array, agent_idx: int, o_obs_state: Arra
 
     k_h0_dot = 2 * (k_xdiff * k_vdiff).sum(axis=-1)
 
-    k_h1 = k_h0_dot + 10.0 * k_h0
-
-    k_isobs = k_idx >= n_agent
+    k_h1 = k_h0_dot + cbf_alpha * k_h0
 
     return k_h1, k_isobs
 
 
-def pwise_cbf_double_integrator(graph: GraphsTuple, r: float, n_agent: int, n_rays: int, k: int):
+def pwise_cbf_double_integrator(graph: GraphsTuple, r: float, n_agent: int, n_rays: int, k: int, cbf_alpha: float = 10.0):
     # (n_agents, 4)
     a_states = graph.type_states(type_idx=0, n_type=n_agent)
     # (n_obs, 4)
@@ -121,83 +122,171 @@ def pwise_cbf_double_integrator(graph: GraphsTuple, r: float, n_agent: int, n_ra
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     agent_idx = jnp.arange(n_agent)
-    fn = jax.vmap(ft.partial(pwise_cbf_double_integrator_, r=r, k=k), in_axes=(0, 0, 0, None))
+    fn = jax.vmap(ft.partial(pwise_cbf_double_integrator_, r=r, k=k, cbf_alpha=cbf_alpha), in_axes=(0, 0, 0, None))
     ak_h0, ak_isobs = fn(a_states, agent_idx, a_obs_states, a_states)
     return ak_h0, ak_isobs
 
 
-def get_pwise_cbf_fn(env: MultiAgentEnv, k: int = 3):
+def get_pwise_cbf_fn(env: MultiAgentEnv, k: int = 3, cbf_alpha: float = 10.0):
     # TODO NEED TO ADD OTHER ENVS
     n_agent = env.num_agents
     # 注意：graph里存的是top_k_rays个障碍物点，不是n_rays
     n_rays = env.params["top_k_rays"]
     r = env.params["car_radius"]
-    return ft.partial(pwise_cbf_double_integrator, r=r, n_agent=n_agent, n_rays=n_rays, k=k)
+    return ft.partial(pwise_cbf_double_integrator, r=r, n_agent=n_agent, n_rays=n_rays, k=k, cbf_alpha=cbf_alpha)
 
 
-def pwise_cbf_double_integrator_with_jacobian_(
-    state: Array, agent_idx: int, o_obs_state: Array, a_state: Array, r: float, k: int, cbf_alpha: float = 10.0
+def pwise_cbf_paper_formulation_(
+    state: Array,
+    agent_idx: int,
+    o_obs_state: Array,
+    a_state: Array,
+    r: float,
+    k: int,
+    m: float = 0.1,
+    alpha1: float = 1.0,
+    alpha2: float = 1.0
 ):
-    """带解析雅可比矩阵的 CBF 计算（单个 agent）
+    """Paper's CBF formulation with relative-degree-2 dynamics
 
-    h1 = h0_dot + alpha * h0
-    h0 = ||Δp||^2 - 4r^2
-    h0_dot = 2 * Δp · Δv
+    Based on the paper's equations:
+    h_ij(x_i, x_j) = ||p_rel,ij||^2 - (d_s + r_i + r_j)^2
+    ḣ_ij(x_i, x_j) = 2 * p_rel,ij · v_rel,ij
+    ḧ_ij(x_i, x_j, u_i) = 2||v_rel,ij||^2 + 2*p_rel,ij · (u_i / m)
 
-    解析雅可比:
-    ∂h1/∂p = 2*alpha*Δp + 2*Δv
-    ∂h1/∂v = 2*Δp
+    CBF constraint: G_ij = ḧ_ij + α₂ḣ_ij + α₁h_ij ≥ 0
+
+    Args:
+        state: agent state [px, py, vx, vy]
+        agent_idx: index of current agent
+        o_obs_state: obstacle states (n_ray, 4)
+        a_state: all agent states (n_agent, 4)
+        r: agent radius
+        k: number of closest neighbors to consider
+        m: agent mass (default: 0.1, so acceleration = u / m = 10 * u)
+        alpha1, alpha2: CBF parameters
+
+    Returns:
+        k_G: CBF constraint values (k,)
+        k_isobs: whether each neighbor is obstacle (k,)
+        k_Gu: Jacobian w.r.t control input (k, 2)
     """
     n_agent = len(a_state)
 
-    pos = state[:2]
-    vel = state[2:]
+    pos = state[:2]  # (2,)
+    vel = state[2:]  # (2,)
     all_obs_state = jnp.concatenate([a_state, o_obs_state], axis=0)
     all_obs_pos = all_obs_state[:, :2]
+    all_obs_vel = all_obs_state[:, 2:]
 
-    # 计算到所有邻居的距离
+    # Distance to all neighbors
     o_dist_sq = ((pos - all_obs_pos) ** 2).sum(axis=-1)
-    o_dist_sq = o_dist_sq.at[agent_idx].set(1e2)  # 排除自己
+    o_dist_sq = o_dist_sq.at[agent_idx].set(1e2)  # exclude self
 
-    # 取最近的 k 个
+    # Get k closest neighbors
     k_idx = jnp.argsort(o_dist_sq)[:k]
-    k_dist_sq = o_dist_sq[k_idx] - 4 * r ** 2
 
-    k_h0 = k_dist_sq
+    # Compute relative states
+    k_p_rel = pos - all_obs_pos[k_idx]  # p_rel,ij = p_i - p_j, (k, 2)
+    k_v_rel = vel - all_obs_vel[k_idx]  # v_rel,ij, (k, 2)
 
-    k_xdiff = state[:2] - all_obs_state[k_idx][:, :2]  # (k, 2)
-    k_vdiff = state[2:] - all_obs_state[k_idx][:, 2:]  # (k, 2)
+    # Mark which neighbors are obstacles vs agents
+    k_isobs = k_idx >= n_agent  # (k,)
 
-    k_h0_dot = 2 * (k_xdiff * k_vdiff).sum(axis=-1)
-    k_h1 = k_h0_dot + cbf_alpha * k_h0
+    # Conservative velocity approximation: v̂_rel = -||v_rel|| * e_ij
+    # where e_ij = p_rel / ||p_rel|| points from j to i
+    # For obstacles (static): assume v_j = 0, so v_rel = v_i
+    # For agents: use actual relative velocity
+    k_p_rel_norm = jnp.linalg.norm(k_p_rel, axis=-1, keepdims=True) + 1e-8  # (k, 1)
+    k_e_ij = k_p_rel / k_p_rel_norm  # (k, 2)
 
-    k_isobs = k_idx >= n_agent
+    # For obstacles, use only agent's velocity; for agents, use relative velocity
+    k_v_for_approx = jnp.where(
+        k_isobs[:, None],  # (k, 1) broadcast
+        vel[None, :],  # Use agent's own velocity for obstacles
+        k_v_rel  # Use relative velocity for other agents
+    )
+    k_v_rel_norm = jnp.linalg.norm(k_v_for_approx, axis=-1, keepdims=True)  # (k, 1)
+    k_v_hat_rel = -k_v_rel_norm * k_e_ij  # (k, 2)
 
-    # 解析雅可比矩阵: ∂h1/∂state = [∂h1/∂p, ∂h1/∂v]
-    k_dh_dp = 2 * cbf_alpha * k_xdiff + 2 * k_vdiff  # (k, 2)
-    k_dh_dv = 2 * k_xdiff  # (k, 2)
-    k_hx = jnp.concatenate([k_dh_dp, k_dh_dv], axis=-1)  # (k, 4)
+    # Barrier function: h_ij = ||p_rel||^2 - safety_dist²
+    # Safety distance:
+    # - Agent-agent: 2r (sum of radii), so (2r)² = 4r²
+    # - Agent-obstacle: LiDAR point is on obstacle surface, so just r (agent radius), r²
+    k_safety_dist_sq = jnp.where(k_isobs, r ** 2, 4 * r ** 2)
+    k_h0 = o_dist_sq[k_idx] - k_safety_dist_sq  # (k,)
 
-    return k_h1, k_isobs, k_hx
+    # First time derivative: ḣ_ij = 2 * p_rel · v_rel
+    # For obstacles, clamp ḣ to non-positive: min(ḣ, 0)
+    # Approaching (ḣ < 0): use actual value, CBF triggers normally
+    # Moving away (ḣ > 0): set to 0, don't let positive ḣ inflate G_base
+    k_h0_dot_actual = 2 * (k_p_rel * k_v_rel).sum(axis=-1)  # (k,)
+    # k_h0_dot = jnp.where(k_isobs, jnp.minimum(k_h0_dot_actual, 0.0), k_h0_dot_actual)  # (k,) clamp version
+    k_h0_dot = k_h0_dot_actual  # no clamp: use actual h0_dot for all neighbors
+
+    # Second time derivative (without control): ḧ_ij = 2||v_rel||^2 + 2*p_rel · u_i
+    # For obstacles, only use normal velocity component: ḧ_base = 2*v_n²
+    # Tangential velocity doesn't contribute to collision avoidance
+    k_v_normal = (k_v_rel * k_e_ij).sum(axis=-1)  # (k,) radial velocity scalar
+    k_v_normal_approaching = jnp.minimum(k_v_normal, 0.0)  # only count when approaching
+    k_h0_ddot_obs = 2 * k_v_normal_approaching ** 2  # obstacles: normal approaching only
+    k_h0_ddot_agent = 2 * (k_v_rel ** 2).sum(axis=-1)  # agents: full ||v_rel||²
+    k_h0_ddot_base = jnp.where(k_isobs, k_h0_ddot_obs, k_h0_ddot_agent)  # (k,)
+
+    # CBF constraint without control: G_ij(x_i, x_j, 0) = ḧ_ij(0) + α₂ḣ_ij + α₁h_ij
+    k_G_base = k_h0_ddot_base + alpha2 * k_h0_dot + alpha1 * k_h0  # (k,)
+
+    # Jacobian w.r.t control: ∂G/∂u = ∂ḧ/∂u = 2*p_rel / m
+    # Since ẍ = u / m, we have ∂ḧ/∂u = 2 * p_rel / m
+    k_Gu = 2 * k_p_rel / m  # (k, 2)
+
+    return k_G_base, k_isobs, k_Gu
 
 
-def pwise_cbf_double_integrator_with_jacobian(
-    graph: GraphsTuple, r: float, n_agent: int, n_rays: int, k: int, cbf_alpha: float = 10.0
+def pwise_cbf_paper_formulation(
+    graph: GraphsTuple,
+    r: float,
+    n_agent: int,
+    n_rays: int,
+    k: int,
+    m: float = 0.1,
+    alpha1: float = 1.0,
+    alpha2: float = 1.0
 ):
-    """带解析雅可比矩阵的 CBF 计算（所有 agent）"""
+    """Paper's CBF formulation for all agents"""
     a_states = graph.type_states(type_idx=0, n_type=n_agent)
     obs_states = graph.type_states(type_idx=2, n_type=n_agent * n_rays)
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     agent_idx = jnp.arange(n_agent)
-    fn = jax.vmap(ft.partial(pwise_cbf_double_integrator_with_jacobian_, r=r, k=k, cbf_alpha=cbf_alpha), in_axes=(0, 0, 0, None))
-    ak_h, ak_isobs, ak_hx = fn(a_states, agent_idx, a_obs_states, a_states)
-    return ak_h, ak_isobs, ak_hx
+    fn = jax.vmap(
+        ft.partial(pwise_cbf_paper_formulation_, r=r, k=k, m=m, alpha1=alpha1, alpha2=alpha2),
+        in_axes=(0, 0, 0, None)
+    )
+    ak_G, ak_isobs, ak_Gu = fn(a_states, agent_idx, a_obs_states, a_states)
+
+    return ak_G, ak_isobs, ak_Gu
 
 
-def get_pwise_cbf_with_jacobian_fn(env: MultiAgentEnv, k: int = 3, cbf_alpha: float = 10.0):
-    """获取带解析雅可比矩阵的 CBF 函数"""
+def get_pwise_cbf_paper_fn(env: MultiAgentEnv, k: int = 3, alpha1: float = 1.0, alpha2: float = 1.0):
+    """Get paper's CBF function with analytical Jacobian
+
+    Args:
+        env: environment
+        k: number of closest neighbors to consider
+        alpha1, alpha2: CBF parameters (should satisfy conditions from Theorem 1)
+    """
     n_agent = env.num_agents
     n_rays = env.params["top_k_rays"]
     r = env.params["car_radius"]
-    return ft.partial(pwise_cbf_double_integrator_with_jacobian, r=r, n_agent=n_agent, n_rays=n_rays, k=k, cbf_alpha=cbf_alpha)
+    m = env.params["m"]  # agent mass
+    return ft.partial(
+        pwise_cbf_paper_formulation,
+        r=r,
+        n_agent=n_agent,
+        n_rays=n_rays,
+        k=k,
+        m=m,
+        alpha1=alpha1,
+        alpha2=alpha2
+    )

@@ -20,7 +20,7 @@ from ..base import MultiAgentEnv
 from dgppo.env.obstacle import Obstacle, Rectangle
 from dgppo.env.plot import render_lidar
 from dgppo.env.utils import get_lidar, lqr, get_node_goal_rng
-from dgppo.algo.utils import get_pwise_cbf_fn
+from dgppo.algo.utils import get_pwise_cbf_fn, get_pwise_cbf_paper_fn
 
 
 class LidarEnvState(NamedTuple):
@@ -91,9 +91,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         self.k = 3  # 考虑最近的 k 个邻居
         self._cbf = None  # 延迟初始化
         self._safe_u_ref_jit = None  # JIT: CBF + QP
-        self._u_ref_only_jit = None  # JIT: 纯 u_ref
         self._get_min_lidar_dist_jit = None  # JIT: LiDAR 距离计算
-        self.lidar_skip_threshold = 0.01  # LiDAR 距离阈值，大于此值跳过 CBF/QP
 
     @property
     def state_dim(self) -> int:
@@ -438,7 +436,7 @@ class LidarEnv(MultiAgentEnv, ABC):
     
 
         error = goal - agent
-        error_max = jnp.abs(error / jnp.linalg.norm(error, axis=-1, keepdims=True) * self._params["comm_radius"])
+        error_max = jnp.abs(error / (jnp.linalg.norm(error, axis=-1, keepdims=True) + 1e-8) * self._params["comm_radius"])
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
 
@@ -489,44 +487,40 @@ class LidarEnv(MultiAgentEnv, ABC):
             goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
 
         error = goal - agent
-        error_max = jnp.abs(error / jnp.linalg.norm(error, axis=-1, keepdims=True) * self._params["comm_radius"])
+        error_max = jnp.abs(error / (jnp.linalg.norm(error, axis=-1, keepdims=True) + 1e-8) * self._params["comm_radius"])
         error = jnp.clip(error, -error_max, error_max)
         return self.clip_action(error @ self._K.T)
 
-    def init_cbf(self, use_adaptive: bool = True, use_closed_form: bool = False):
+    def init_cbf(self, use_closed_form: bool = False, use_paper_cbf: bool = False, cbf_alpha1: float = 1.0, cbf_alpha2: float = 1.0, cbf_alpha: float = 10.0, **kwargs):
         """初始化 CBF 函数和 JIT 编译 - 必须在使用前调用
 
         Args:
-            use_adaptive: 是否使用自适应模式（每个 timestep 根据 agent 间距离动态选择），默认 True
             use_closed_form: 是否使用闭式解（极快，无QP求解），默认 False
+            use_paper_cbf: 是否使用论文中的 relative-degree-2 CBF，默认 False
+            cbf_alpha1: CBF 参数 α₁（仅当 use_paper_cbf=True 时使用）
+            cbf_alpha2: CBF 参数 α₂（仅当 use_paper_cbf=True 时使用）
 
         Note:
-            - 自适应模式：agent 间最小距离 < cbf_comm_radius 时用 CBF，否则用纯 u_ref
             - 闭式解模式：用投影法替代 QP 求解，速度快 10-50x，精度略有损失
+            - Paper CBF: 使用 relative-degree-2 CBF with conservative velocity approximation
         """
         if self._cbf is None:
-            print("Initializing CBF function...")
-            self._cbf = get_pwise_cbf_fn(self, self.k)
+            if use_paper_cbf:
+                print(f"Initializing PAPER CBF function (alpha1={cbf_alpha1}, alpha2={cbf_alpha2})...")
+                self._cbf = get_pwise_cbf_paper_fn(self, self.k, alpha1=cbf_alpha1, alpha2=cbf_alpha2)
+                self._cbf_type = "paper"  # 标记使用的 CBF 类型
+            else:
+                print(f"Initializing CBF function (cbf_alpha={cbf_alpha})...")
+                self._cbf = get_pwise_cbf_fn(self, self.k, cbf_alpha=cbf_alpha)
+                self._cbf_type = "standard"
 
         if self._safe_u_ref_jit is None:
             if use_closed_form:
                 print("JIT compiling safe_u_ref with CLOSED-FORM solver (fast mode)...")
-                if use_adaptive:
-                    self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl_closed_form)
-                else:
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl_closed_form)
+                self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl_closed_form)
             else:
-                if use_adaptive:
-                    cbf_comm_radius = self._params["cbf_comm_radius"]
-                    print(f"JIT compiling adaptive_safe_u_ref with QP solver (cbf_comm_radius={cbf_comm_radius})...")
-                    self._safe_u_ref_jit = jax.jit(self._adaptive_safe_u_ref_impl)
-                else:
-                    print("JIT compiling safe_u_ref with QP solver...")
-                    self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl)
-
-        if self._u_ref_only_jit is None:
-            print("JIT compiling u_ref_only...")
-            self._u_ref_only_jit = jax.jit(self._u_ref_only)
+                print("JIT compiling safe_u_ref with QP solver...")
+                self._safe_u_ref_jit = jax.jit(self._safe_u_ref_impl)
 
         if self._get_min_lidar_dist_jit is None:
             print("JIT compiling get_min_lidar_dist...")
@@ -537,11 +531,19 @@ class LidarEnv(MultiAgentEnv, ABC):
     def get_cbf(self, graph: GraphsTuple) -> tuple[Array, Array]:
         """获取 CBF 值"""
         # 注意：self._cbf 必须在 JIT 之前初始化（调用 init_cbf）
-        ak_h0, ak_isobs = self._cbf(graph)
-        return ak_h0, ak_isobs
+        result = self._cbf(graph)
+        if len(result) == 3:  # Paper CBF returns (G, isobs, Gu)
+            return result[0], result[1]  # Return only G and isobs for backward compatibility
+        else:  # Standard CBF returns (h, isobs)
+            return result[0], result[1]
 
     def get_qp_action(self, graph: GraphsTuple, u_ref: Optional[Action] = None, relax_penalty: float = 1e3) -> [Action, Array]:
         """获取 QP 过滤后的安全动作"""
+        # Check if using paper CBF (which provides analytical Jacobian)
+        if hasattr(self, '_cbf_type') and self._cbf_type == "paper":
+            return self._get_qp_action_paper_cbf(graph, u_ref, relax_penalty)
+
+        # Standard CBF path (autodiff-based)
         agent_node_mask = graph.node_type == 0
         agent_node_id = mask2index(agent_node_mask, self.num_agents)
 
@@ -583,8 +585,29 @@ class LidarEnv(MultiAgentEnv, ABC):
         )
         return au_opt, ar
 
+    def _get_qp_action_paper_cbf(self, graph: GraphsTuple, u_ref: Optional[Action] = None, relax_penalty: float = 1e3) -> [Action, Array]:
+        """Paper CBF QP solver - uses pre-computed analytical Jacobian
+
+        Paper CBF returns: (G_base, isobs, Gu) where:
+        - G_base = ḧ(u=0) + α₂*ḣ + α₁*h (constraint value at u=0)
+        - Gu = ∂G/∂u = -2*p_rel (analytical Jacobian)
+
+        QP constraint becomes: G_base + Gu @ u >= 0
+        """
+        # Get paper CBF output with analytical Jacobian
+        ak_G_base, ak_isobs, ak_Gu = self._cbf(graph)
+
+        au_ref = u_ref
+        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
+
+        # Solve QP for each agent
+        au_opt, ar = jax_vmap(ft.partial(self._solve_qp_single_paper_cbf, relax_penalty=relax_penalty))(
+            ak_G_base, ak_Gu, au_ref, ak_resp
+        )
+        return au_opt, ar
+
     def _solve_qp_single(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float, relax_penalty: float = 1e3):
-        """单个 agent 的 QP 求解（JIT 兼容，无 assert）"""
+        """单个 agent 的 QP 求解（JIT 兼容，无 assert）- Standard CBF"""
         n_qp_x = self.action_dim + self.k
 
         u_lb, u_ub = self.action_lim()
@@ -616,8 +639,52 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         return u_opt, r
 
+    def _solve_qp_single_paper_cbf(self, k_G_base, k_Gu, u_ref, k_responsibility: float, relax_penalty: float = 1e3):
+        """单个 agent 的 QP 求解 - Paper CBF (relative-degree-2)
+
+        Paper CBF constraint: G_base + Gu @ u >= 0
+        where G_base = ḧ(u=0) + α₂*ḣ + α₁*h, Gu = ∂G/∂u
+
+        QP formulation:
+        min  0.5 * ||u - u_ref||^2 + penalty * ||r||^2
+        s.t. Gu @ u + r >= -G_base  (with responsibility weighting)
+             u_lb <= u <= u_ub
+             r >= 0
+        """
+        n_qp_x = self.action_dim + self.k
+        u_lb, u_ub = self.action_lim()
+
+        # Cost: minimize ||u - u_ref||^2 + penalty * ||r||^2
+        H = jnp.eye(n_qp_x, dtype=jnp.float32)
+        H = H.at[-self.k:, -self.k:].set(10.0)
+        g = jnp.concatenate([-u_ref, relax_penalty * jnp.ones(self.k)], axis=0)
+
+        # Constraint: -Gu @ u - r <= G_base * responsibility
+        # In QP form: C @ x <= b, where x = [u, r]
+        k_C = -jnp.concatenate([k_Gu, jnp.eye(self.k)], axis=1)  # (k, nu + k)
+        k_b = k_responsibility * k_G_base  # (k,)
+
+        # Box constraints
+        r_lb = jnp.full(self.k, 0.0, dtype=jnp.float32)
+        r_ub = jnp.full(self.k, jnp.inf, dtype=jnp.float32)
+        l_box = jnp.concatenate([u_lb, r_lb], axis=0)
+        u_box = jnp.concatenate([u_ub, r_ub], axis=0)
+
+        # Solve QP
+        qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
+        settings = JaxProxQP.Settings.default()
+        settings.max_iter = 4
+        settings.dua_gap_thresh_abs = None
+        solver = JaxProxQP(qp, settings)
+        sol = solver.solve()
+
+        u_opt = sol.x[:self.action_dim]
+        r = sol.x[-self.k:]
+
+        return u_opt, r
+
     def _solve_cbf_closed_form(self, k_h, k_Lf_h, k_Lg_h, u_ref, k_responsibility: float):
-        """闭式 CBF 过滤（无 QP 求解器，极快）
+        """闭式 CBF 过滤（无 QP 求解器，极快）- Standard CBF
 
         CBF 约束: Lg_h @ u + Lf_h + α*h >= 0
         即: a @ u >= b, 其中 a = Lg_h, b = -Lf_h - α*h
@@ -665,8 +732,55 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         return u_safe, r
 
+    def _solve_cbf_closed_form_paper(self, k_G_base, k_Gu, u_ref, k_responsibility: float):
+        """闭式 CBF 过滤 - Paper CBF (relative-degree-2)
+
+        Paper CBF 约束: G_base + Gu @ u >= 0
+        即: a @ u >= b, 其中 a = Gu, b = -G_base
+
+        若违反，投影到约束边界: u_safe = u_ref + λ * a^T
+        其中 λ = (b - a @ u_ref) / ||a||²
+        """
+        u_lb, u_ub = self.action_lim()
+
+        # Paper CBF 约束: Gu @ u >= -G_base (考虑责任系数)
+        k_b = -k_responsibility * k_G_base  # (k,)
+        k_margin = (k_Gu @ u_ref) - k_b  # (k,)
+
+        u_safe = u_ref
+
+        def project_single_constraint(u_current, constraint_idx):
+            a = k_Gu[constraint_idx]  # (nu,)
+            b = k_b[constraint_idx]    # scalar
+
+            margin = a @ u_current - b
+            a_norm_sq = (a ** 2).sum() + 1e-8
+
+            lambda_proj = jnp.maximum(0, -margin / a_norm_sq)
+            u_new = u_current + lambda_proj * a
+
+            return jnp.clip(u_new, u_lb, u_ub)
+
+        sorted_idx = jnp.argsort(k_margin)
+
+        def body_fn(i, u):
+            idx = sorted_idx[i]
+            return project_single_constraint(u, idx)
+
+        u_safe = jax.lax.fori_loop(0, self.k, body_fn, u_safe)
+
+        k_margin_final = (k_Gu @ u_safe) - k_b
+        r = jnp.maximum(0, -k_margin_final)
+
+        return u_safe, r
+
     def get_qp_action_closed_form(self, graph: GraphsTuple, u_ref: Action) -> tuple[Action, Array]:
         """使用闭式解的安全动作（替代 get_qp_action）"""
+        # Check if using paper CBF
+        if hasattr(self, '_cbf_type') and self._cbf_type == "paper":
+            return self._get_qp_action_closed_form_paper_cbf(graph, u_ref)
+
+        # Standard CBF path
         agent_node_mask = graph.node_type == 0
         agent_node_id = mask2index(agent_node_mask, self.num_agents)
 
@@ -700,6 +814,16 @@ class LidarEnv(MultiAgentEnv, ABC):
         )
         return au_opt, ar
 
+    def _get_qp_action_closed_form_paper_cbf(self, graph: GraphsTuple, u_ref: Action) -> tuple[Action, Array]:
+        """Paper CBF closed-form solver"""
+        ak_G_base, ak_isobs, ak_Gu = self._cbf(graph)
+        ak_resp = jnp.where(ak_isobs, 1.0, 0.5)
+
+        au_opt, ar = jax_vmap(self._solve_cbf_closed_form_paper)(
+            ak_G_base, ak_Gu, u_ref, ak_resp
+        )
+        return au_opt, ar
+
     def _safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
         """使用闭式解的 safe_u_ref"""
         nominal_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
@@ -728,74 +852,6 @@ class LidarEnv(MultiAgentEnv, ABC):
         dist = dist - 2 * r  # 减去两倍半径（agent + obstacle）
 
         return dist.min()
-
-    def _u_ref_only(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """纯 u_ref，无 CBF（用于邻居距离足够远时）"""
-        return self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-
-    def _get_min_neighbor_dist(self, graph: GraphsTuple) -> Array:
-        """计算到最近邻居（agent 或 obstacle）的距离"""
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]  # (n_agent, 2)
-
-        # Agent-agent 距离
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)  # (n_agent, n_agent)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6  # 排除自己
-        min_agent_dist = agent_dist.min()
-
-        # Agent-obstacle 距离（如果有障碍物）
-        if self.params["n_obs"] > 0:
-            n_rays = self._params["top_k_rays"]
-            obs_states = graph.type_states(type_idx=2, n_type=self.num_agents * n_rays)
-            obs_pos = obs_states[:, :2].reshape(self.num_agents, n_rays, 2)  # (n_agent, n_rays, 2)
-            obs_dist = jnp.linalg.norm(agent_pos[:, None, :] - obs_pos, axis=-1)  # (n_agent, n_rays)
-            min_obs_dist = obs_dist.min()
-            return jnp.minimum(min_agent_dist, min_obs_dist)
-        else:
-            return min_agent_dist
-
-    def _adaptive_safe_u_ref_impl(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """自适应安全控制器：每个 agent 单独判断是否使用 CBF
-
-        对于每个 agent：
-        - 如果该 agent 到最近其他 agent 的距离 >= comm_radius，使用纯 u_ref
-        - 如果该 agent 到最近其他 agent 的距离 < comm_radius，使用 safe_u_ref (CBF)
-        """
-        cbf_comm_radius = self._params["cbf_comm_radius"]
-
-        # 计算每个 agent 到最近其他 agent 的距离
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6  # 排除自己
-        min_dist_per_agent = agent_dist.min(axis=1)  # (n_agent,) 每个 agent 到最近邻居的距离
-
-        # 每个 agent 单独判断：附近有其他 agent 时用 CBF
-        use_cbf_per_agent = min_dist_per_agent < cbf_comm_radius  # (n_agent,)
-
-        # 计算两种控制器的输出
-        u_ref_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)  # (n_agent, action_dim)
-        safe_action = self._safe_u_ref_impl(graph, target_pos, is_final_goal)  # (n_agent, action_dim)
-
-        # 每个 agent 单独选择
-        return jnp.where(use_cbf_per_agent[:, None], safe_action, u_ref_action)
-
-    def _adaptive_safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
-        """自适应安全控制器（闭式解版本）"""
-        cbf_comm_radius = self._params["cbf_comm_radius"]
-
-        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
-        agent_pos = agent_states[:, :2]
-        agent_dist = jnp.linalg.norm(agent_pos[:, None, :] - agent_pos[None, :, :], axis=-1)
-        agent_dist = agent_dist + jnp.eye(self.num_agents) * 1e6
-        min_dist_per_agent = agent_dist.min(axis=1)
-
-        use_cbf_per_agent = min_dist_per_agent < cbf_comm_radius
-
-        u_ref_action = self.u_ref(graph, target_pos=target_pos, is_final_goal=is_final_goal)
-        safe_action = self._safe_u_ref_impl_closed_form(graph, target_pos, is_final_goal)
-
-        return jnp.where(use_cbf_per_agent[:, None], safe_action, u_ref_action)
 
     def safe_u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
         """安全的参考控制器：u_ref + CBF过滤
