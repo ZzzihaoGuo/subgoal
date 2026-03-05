@@ -345,7 +345,7 @@ def manifold_single_agent_(
     o_dist_sq_pred = o_dist_sq_pred.at[agent_idx].set(1e6)
     # 取更危险的距离 (更小的那个)
     o_dist_sq = jnp.minimum(o_dist_sq_now, o_dist_sq_pred)
-    k_idx = jnp.argsort(o_dist_sq)[:k]
+    _, k_idx = jax.lax.top_k(-o_dist_sq, k)  # 取最小的 k 个
 
     k_p_rel = q - all_obs_pos[k_idx]  # (k, 2) — 当前相对位置
     k_vel = all_obs_vel[k_idx]  # (k, 2)
@@ -403,34 +403,34 @@ def manifold_single_agent_(
     k_psi_raw = k_dg_dt + K * k_dJdt_dq
     k_psi = jnp.maximum(k_psi_raw, 0.0) * active_f  # (k,)
 
-    # ===== 8. SVD pseudo-inverse (damped, 加权: 优先调整 action 而非 slack) =====
+    # ===== 8. 解析 pseudo-inverse (damped, 加权) — 替代 SVD, 训练时快很多 =====
     # 加权: slack 变化代价 = w_slack 倍 action 变化代价
-    # → pseudo-inverse 优先用 action 修正, slack 只吸收残差
     W_inv = jnp.ones(dim_q + k)
     W_inv = W_inv.at[dim_q:].set(1.0 / w_slack)
-    Jc_w = Jc * W_inv[None, :]  # 缩放 slack 列, 使其在 SVD 中权重更低
+    Jc_w = Jc * W_inv[None, :]  # (k, 2+k)
 
-    U, S, Vh = jnp.linalg.svd(Jc_w, full_matrices=True)
+    # J⁺ = Jᵀ(JJᵀ + λI)⁻¹ — 只需 k×k 矩阵求逆, 比 SVD 快
     lambda_sq = 0.01
-    S_inv = S / (S ** 2 + lambda_sq)
-    Jc_w_pinv = (Vh[:k].T * S_inv[None, :]) @ U.T  # (2+k, k)
-    # 还原加权: z = W_inv * Jc_w_pinv @ b
-    Jc_pinv = W_inv[:, None] * Jc_w_pinv  # (2+k, k)
-    Nc_w = Vh[k:].T  # null space of Jc_w
-    Nc = W_inv[:, None] * Nc_w  # 还原到原空间
+    JJT = Jc_w @ Jc_w.T + lambda_sq * jnp.eye(k)  # (k, k)
+    JJT_inv = jnp.linalg.inv(JJT)  # (k, k) — k=3, 极快
+    Jc_w_pinv = Jc_w.T @ JJT_inv  # (2+k, k)
+    Jc_pinv = W_inv[:, None] * Jc_w_pinv  # (2+k, k) 还原加权
+
+    # Null space 投影矩阵: P = I - J⁺J (在加权空间)
+    P = jnp.eye(dim_q + k) - Jc_pinv @ Jc  # (2+k, 2+k)
 
     # ===== 9. ATACOM 特解 =====
     a_comp = -Jc_pinv @ k_psi  # (2+k,)
     k_c = jnp.maximum(k_g_viab, 0.0) * active_f  # (k,) 只在 viability 违反时修正
     err = -Jc_pinv @ (Kc * k_c)  # (2+k,)
 
-    # ===== 10. Null space + 法向/切向分解 =====
-    Nc_q = Nc[:dim_q]  # (2, 2)
+    # ===== 10. Null space 投影 + 法向/切向分解 =====
     target = u_ref - (a_comp[:dim_q] + err[:dim_q])  # (2,)
-    alpha, _, _, _ = jnp.linalg.lstsq(Nc_q, target)  # (2,)
-    alpha_norm = jnp.linalg.norm(alpha)
-    alpha = jnp.where(alpha_norm > alpha_max, alpha * alpha_max / (alpha_norm + 1e-8), alpha)
-    b_proj = Nc @ alpha  # (2+k,)
+    target_full = jnp.zeros(dim_q + k).at[:dim_q].set(target)  # (2+k,)
+    b_proj = P @ target_full  # (2+k,) — 投影到 null space
+    # 限幅
+    b_norm = jnp.linalg.norm(b_proj[:dim_q])
+    b_proj = jnp.where(b_norm > alpha_max, b_proj * alpha_max / (b_norm + 1e-8), b_proj)
 
     # 约束法向: J_g 加权平均 (指向障碍物方向)
     normal_sum = jnp.sum(k_J_g * active_f[:, None], axis=0)  # (2,)
