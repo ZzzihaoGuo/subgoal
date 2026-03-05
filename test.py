@@ -164,6 +164,8 @@ def test(args):
     rates = []
     last_rewards = []
     last_dists = []
+    is_success_list = []        # (n_epi, n_agents) 每个agent是否到达goal，汇总方式同 is_unsafes
+    success_rates_per_epi = []  # 每个episode是否所有agent都到达goal
 
     # test
     for i_epi in range(args.epi):
@@ -181,19 +183,46 @@ def test(args):
         last_dists.append(last_dist)
         rollouts.append(rollout)
         safe_rate = 1 - is_unsafes[-1].max(axis=0).mean()
-        print(f"epi: {i_epi}, reward: {epi_reward:.3f}, cost: {epi_cost:.3f}, "
-              f"last_reward: {last_reward:.4f}, last_dist: {last_dist:.4f}, safe rate: {safe_rate * 100:.3f}%")
+
+        # 计算 success: 最后一帧每个agent是否到达goal (dist < threshold)
+        dist_thresh = env.params.get("dist2goal", 0.01)
+        if rollout.dist2goal is not None:
+            final_dist = rollout.dist2goal[-1]  # (n_goals,)
+        else:
+            final_states = rollout.graph.states[-1]  # (n_nodes, state_dim)
+            n_agents = env.num_agents
+            n_goals = env.num_agents
+            agent_pos = final_states[:n_agents, :2]
+            goal_pos = final_states[n_agents:n_agents + n_goals, :2]
+            final_dist = jnp.linalg.norm(
+                jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
+            ).min(axis=1)  # (n_goals,)
+        agent_reached = np.array(final_dist < dist_thresh)  # (n_agents,) bool
+        is_success_list.append(agent_reached)
+        epi_all_success = float(agent_reached.all())
+        success_rates_per_epi.append(epi_all_success)
+
+        print(f"epi: {i_epi}, reward: {epi_reward:.7f}, cost: {epi_cost:.7f}, "
+              f"last_reward: {last_reward:.7f}, last_dist: {last_dist:.7f}, safe rate: {safe_rate * 100:.7f}%, "
+              f"success: {agent_reached.mean() * 100:.1f}% ({agent_reached.sum()}/{len(agent_reached)})")
 
         rates.append(np.array(safe_rate))
 
     is_unsafe = np.max(np.stack(is_unsafes), axis=1)
     safe_mean, safe_std = (1 - is_unsafe).mean(), (1 - is_unsafe).std()
 
+    # success rate: 所有epi所有agent展平，到达goal的agent数 / 总agent数（同safe_rate计算方式）
+    is_success = np.stack(is_success_list)  # (n_epi, n_agents)
+    success_agent_mean = is_success.mean()
+    # success rate: 所有agent都到达goal的episode比例
+    success_epi_mean = np.mean(success_rates_per_epi)
+
     print(
-        f"reward: {np.mean(rewards):.3f}, min/max reward: {np.min(rewards):.3f}/{np.max(rewards):.3f}, "
-        f"cost: {np.mean(costs):.3f}, min/max cost: {np.min(costs):.3f}/{np.max(costs):.3f}, "
-        f"last_reward: {np.mean(last_rewards):.4f}, last_dist: {np.mean(last_dists):.4f}, "
-        f"safe_rate: {safe_mean * 100:.3f}%"
+        f"reward: {np.mean(rewards):.7f}, min/max reward: {np.min(rewards):.7f}/{np.max(rewards):.7f}, "
+        f"cost: {np.mean(costs):.7f}, min/max cost: {np.min(costs):.7f}/{np.max(costs):.7f}, "
+        f"last_reward: {np.mean(last_rewards):.7f}, last_dist: {np.mean(last_dists):.7f}, "
+        f"safe_rate: {safe_mean * 100:.7f}%, "
+        f"success_agent: {success_agent_mean * 100:.7f}%, success_epi: {success_epi_mean * 100:.7f}%"
     )
 
     # save results
@@ -201,7 +230,7 @@ def test(args):
         with open(os.path.join(path, "test_log.csv"), "a") as f:
             f.write(f"{env.num_agents},{args.epi},{env.max_episode_steps},"
                     f"{env.area_size},{env.params['n_obs']},"
-                    f"{safe_mean * 100:.3f},{safe_std * 100:.3f}\n")
+                    f"{safe_mean * 100:.7f},{safe_std * 100:.7f}\n")
 
     # make video
     if args.no_video:
@@ -211,7 +240,7 @@ def test(args):
     videos_dir.mkdir(exist_ok=True, parents=True)
     for ii, (rollout, Ta_is_unsafe) in enumerate(zip(rollouts, is_unsafes)):
         safe_rate = rates[ii] * 100
-        video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.3f}_cost{costs[ii]:.3f}_sr{safe_rate:.0f}"
+        video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.7f}_cost{costs[ii]:.7f}_sr{safe_rate:.0f}"
         viz_opts = {}
         video_path = videos_dir / f"{stamp_str}_{video_name}.mp4"
         env.render_video(rollout, video_path, Ta_is_unsafe, viz_opts, dpi=args.dpi,
@@ -222,13 +251,13 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_131235404_HUMY")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_212001549_UBBT")
 
     # custom arguments
     parser.add_argument("--no-video", action="store_true", default=True)
     parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
-    parser.add_argument("--obs", type=int, default=None)
+    parser.add_argument("--obs", type=int, default=0)
     parser.add_argument("--stochastic", action="store_true", default=False)
     parser.add_argument("--full-observation", action="store_true", default=False)
     parser.add_argument("--debug", action="store_true", default=False)
@@ -239,17 +268,17 @@ def main():
                         help="Show subgoal markers in video (for hierarchical RL)")
     parser.add_argument("--subgoal-interval", type=int, default=8,
                         help="Subgoal interval for hierarchical RL")
-    parser.add_argument("--cbf-std-alpha1", type=float, default=40.0,
+    parser.add_argument("--cbf-std-alpha1", type=float, default=36.0,
                         help="Standard CBF parameter α₁ (used in CBF value computation in utils.py)")
-    parser.add_argument("--cbf-std-alpha2", type=float, default=16.0,
+    parser.add_argument("--cbf-std-alpha2", type=float, default=36.0,
                         help="Standard CBF parameter α₂ (used in CBF solver constraint)")
 
     # CBF solver arguments (match train_try_1.py)
     parser.add_argument("--use-paper-cbf", action="store_true", default=True,
                         help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
-    parser.add_argument("--cbf-alpha1", type=float, default=40,
+    parser.add_argument("--cbf-alpha1", type=float, default=36,
                         help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
-    parser.add_argument("--cbf-alpha2", type=float, default=16,
+    parser.add_argument("--cbf-alpha2", type=float, default=20,
                         help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
     parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
                         help="Use closed-form CBF solver (10-50x faster than QP)")
@@ -260,7 +289,7 @@ def main():
                         help="Max delta for relative subgoal (overrides config if set)")
 
     # default arguments
-    parser.add_argument("-n", "--num-agents", type=int, default=None)
+    parser.add_argument("-n", "--num-agents", type=int, default=7)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--env", type=str, default=None)
     parser.add_argument("--offset", type=int, default=0)

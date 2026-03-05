@@ -1,0 +1,13 @@
+program: train_try_1.py
+method: grid
+metric:
+  name: eval/sparse_reward
+  goal: maximize
+
+parameters:
+  dist_to_goal_coef:
+    values: [0.05, 0.01]
+  # cbf_alpha1:
+  #   values: [40, 50]
+  # cbf_alpha2:
+  #   values: [30, 40]

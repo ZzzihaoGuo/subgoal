@@ -20,7 +20,7 @@ from ..base import MultiAgentEnv
 from dgppo.env.obstacle import Obstacle, Rectangle
 from dgppo.env.plot import render_lidar
 from dgppo.env.utils import get_lidar, lqr, get_node_goal_rng
-from dgppo.algo.utils import get_pwise_cbf_fn, get_pwise_cbf_paper_fn
+from dgppo.algo.utils import get_pwise_cbf_fn, get_pwise_cbf_paper_fn, get_manifold_fn
 
 
 class LidarEnvState(NamedTuple):
@@ -88,8 +88,10 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         # CBF 参数
         self.cbf_alpha = cbf_alpha
-        self.k = 3  # 考虑最近的 k 个邻居
+        self.k = 21  # 考虑最近的 k 个邻居
         self._cbf = None  # 延迟初始化
+        self._manifold = None  # 延迟初始化: manifold 修正函数
+        self._manifold_init_slack = None  # 延迟初始化: 松弛变量初始化函数
         self._safe_u_ref_jit = None  # JIT: CBF + QP
         self._get_min_lidar_dist_jit = None  # JIT: LiDAR 距离计算
 
@@ -299,7 +301,7 @@ class LidarEnv(MultiAgentEnv, ABC):
             # 2. subgoal距离 > lidar点距离 + car_radius（在阴影区，考虑agent半径作为安全边距）
             car_radius = self.params["car_radius"]
             in_cone = angles < theta
-            in_shadow = dist_to_subgoal > (dist_to_lidar + car_radius)
+            in_shadow = dist_to_subgoal > (dist_to_lidar - car_radius) #  - car_radius
 
             # 任一lidar射线满足条件则危险
             is_dangerous = jnp.any(in_cone & in_shadow)
@@ -434,57 +436,6 @@ class LidarEnv(MultiAgentEnv, ABC):
             )
             goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
     
-
-        error = goal - agent
-        error_max = jnp.abs(error / (jnp.linalg.norm(error, axis=-1, keepdims=True) + 1e-8) * self._params["comm_radius"])
-        error = jnp.clip(error, -error_max, error_max)
-        return self.clip_action(error @ self._K.T)
-
-    def u_ref_2(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
-        """
-        改进版u_ref：当subgoal接近真实goal时自动减速，避免CBF和u_ref打架
-        """
-        agent = graph.type_states(type_idx=0, n_type=self.num_agents)
-        real_goal = graph.type_states(type_idx=1, n_type=self.num_agents)
-
-        if target_pos is None:
-            goal = real_goal
-        else:
-            goal_pos = target_pos
-            agent_pos = agent[:, :2]
-            real_goal_pos = real_goal[:, :2]
-
-            # 计算agent到subgoal的方向和距离
-            direction = goal_pos - agent_pos
-            dist = jnp.linalg.norm(direction, axis=-1, keepdims=True)
-            direction_unit = jnp.where(dist > 1e-6, direction / dist, 0.0)
-
-            # 计算subgoal到真实goal的距离
-            dist_subgoal_to_real_goal = jnp.linalg.norm(goal_pos - real_goal_pos, axis=-1, keepdims=True)
-
-            # 速度参数
-            max_vel = 0.7
-            cruise_speed = max_vel * 0.01
-            approach_dist = 0.05
-
-            # 普通subgoal的速度
-            normal_speed = jnp.where(
-                dist > approach_dist,
-                max_vel * 0.8,
-                cruise_speed
-            )
-            normal_vel = direction_unit * normal_speed
-
-            # 接近真实goal时的减速方案
-            slow_speed = jnp.clip(dist * 1.0, 0.0, max_vel * 0.2)
-            slow_vel = direction_unit * slow_speed
-
-            # 判断是否需要减速：is_final_goal 或 subgoal距离真实goal很近
-            near_real_goal_thresh = 0.2
-            should_slow_down = is_final_goal | (dist_subgoal_to_real_goal < near_real_goal_thresh)
-
-            desired_vel = jnp.where(should_slow_down, slow_vel, normal_vel)
-            goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
 
         error = goal - agent
         error_max = jnp.abs(error / (jnp.linalg.norm(error, axis=-1, keepdims=True) + 1e-8) * self._params["comm_radius"])
@@ -823,6 +774,67 @@ class LidarEnv(MultiAgentEnv, ABC):
             ak_G_base, ak_Gu, u_ref, ak_resp
         )
         return au_opt, ar
+
+    def init_manifold(self, k: int = None, K: float = 0.5, Kc: float = 100.0,
+                      s_min: float = 0.1, alpha_max: float = 50.0, g_act_thresh: float = 0.1,
+                      safety_margin: float = 0.02, n_lookahead: int = 2, w_slack: float = 5.0):
+        """初始化 manifold 修正函数 (ATACOM v7)
+
+        Args:
+            k: 考虑最近的 k 个邻居，默认使用 self.k
+            K: viability constraint 增益
+            Kc: error correction 增益
+            s_min: 松弛变量下界，防止 Jc 病态
+            alpha_max: null space 控制量上界
+            g_act_thresh: 约束激活阈值
+            safety_margin: 安全边距，约束比碰撞判定更严格
+            n_lookahead: 前瞻步数 (在预测位置评估约束)
+            w_slack: slack 加权 (越大越优先通过 action 修正)
+        """
+        if k is None:
+            k = self.k
+        if self._manifold is None:
+            print(f"Initializing manifold (k={k}, K={K}, Kc={Kc}, s_min={s_min}, "
+                  f"alpha_max={alpha_max}, g_act_thresh={g_act_thresh}, "
+                  f"safety_margin={safety_margin}, n_lookahead={n_lookahead}, w_slack={w_slack})...")
+            self._manifold, self._manifold_init_slack = get_manifold_fn(
+                self, k=k, K=K, Kc=Kc, s_min=s_min,
+                alpha_max=alpha_max, g_act_thresh=g_act_thresh,
+                safety_margin=safety_margin, n_lookahead=n_lookahead, w_slack=w_slack)
+        return self
+
+    def manifold_init_slack(self, graph: GraphsTuple):
+        """初始化松弛变量 (从当前 graph 计算)"""
+        if self._manifold_init_slack is None:
+            raise RuntimeError("Must call init_manifold() before using manifold_init_slack")
+        return self._manifold_init_slack(graph)
+
+    def get_manifold_action(self, graph: GraphsTuple, u_ref: Action,
+                            s_all=None) -> tuple[Action, Array, ...]:
+        """Manifold-based 安全动作修正
+
+        Parameters
+        ----------
+        graph : GraphsTuple
+            当前环境状态图
+        u_ref : Action
+            nominal action, shape (n_agents, action_dim)
+        s_all : Array, optional
+            松弛变量, shape (n_agents, n_total_neighbors)
+
+        Returns
+        -------
+        u_opt : Action
+            修正后的安全动作, shape (n_agents, action_dim)
+        relax : Array
+            约束违反量, shape (n_agents, k)
+        s_new : Array
+            更新后的松弛变量, shape (n_agents, n_total_neighbors)
+        """
+        if self._manifold is None:
+            raise RuntimeError("Must call init_manifold() before using get_manifold_action")
+        u_opt, relax, s_new, debug_info = self._manifold(graph, u_ref, s_all)
+        return u_opt, relax, s_new, debug_info
 
     def _safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
         """使用闭式解的 safe_u_ref"""

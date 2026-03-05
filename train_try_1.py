@@ -223,7 +223,7 @@ def main():
                         help="Use paper's relative-degree-2 CBF with conservative velocity approximation")
     parser.add_argument("--cbf-alpha1", type=float, default=40.0,
                         help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
-    parser.add_argument("--cbf-alpha2", type=float, default=16.0,
+    parser.add_argument("--cbf-alpha2", type=float, default=30.0,
                         help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
     parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
                         help="Use closed-form CBF solver (10-50x faster than QP)")
