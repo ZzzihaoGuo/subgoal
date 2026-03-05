@@ -335,27 +335,42 @@ def manifold_single_agent_(
     all_obs_pos = all_obs_state[:, :2]
     all_obs_vel = all_obs_state[:, 2:]  # (n_total, 2)
 
-    # ===== 1. 取 k 个最近邻 — 用当前距离, 保证不漏掉近距离碰撞 =====
-    o_dist_sq = ((q - all_obs_pos) ** 2).sum(axis=-1)
-    o_dist_sq = o_dist_sq.at[agent_idx].set(1e6)
+    # ===== 1. 取 k 个最近邻 — 用 min(当前, 预测) 距离, 防止漏掉高速接近的障碍 =====
+    o_dist_sq_now = ((q - all_obs_pos) ** 2).sum(axis=-1)
+    o_dist_sq_now = o_dist_sq_now.at[agent_idx].set(1e6)
+    all_rel_vel_sel = dq[None, :] - all_obs_vel  # (n_total, 2)
+    lookahead_sel = dt * jnp.maximum(n_lookahead, 2)  # 至少看 2 步
+    o_p_rel_pred = (q - all_obs_pos) + all_rel_vel_sel * lookahead_sel
+    o_dist_sq_pred = (o_p_rel_pred ** 2).sum(axis=-1)
+    o_dist_sq_pred = o_dist_sq_pred.at[agent_idx].set(1e6)
+    # 取更危险的距离 (更小的那个)
+    o_dist_sq = jnp.minimum(o_dist_sq_now, o_dist_sq_pred)
     k_idx = jnp.argsort(o_dist_sq)[:k]
 
     k_p_rel = q - all_obs_pos[k_idx]  # (k, 2) — 当前相对位置
     k_vel = all_obs_vel[k_idx]  # (k, 2)
     k_isobs = k_idx >= n_agent
-    k_safety_dist_sq = jnp.where(
-        k_isobs,
-        (r + safety_margin) ** 2,
-        (2 * r + safety_margin) ** 2,
-    )
+    k_rel_vel = dq[None, :] - k_vel  # (k, 2)
+
+    # ===== 动态安全半径: 基于接近速度的刹车距离 =====
+    k_p_rel_norm = jnp.linalg.norm(k_p_rel, axis=-1, keepdims=True)  # (k, 1)
+    k_p_rel_hat = k_p_rel / (k_p_rel_norm + 1e-8)  # (k, 2) 单位方向
+    # 接近速度 (正值 = 在靠近)
+    k_v_approach = jnp.maximum(0.0, -jnp.sum(k_rel_vel * k_p_rel_hat, axis=-1))  # (k,)
+    # 刹车距离 = v² / (2 * a_max), a_max = acc_scale * action_clip(1.0)
+    k_braking_dist = k_v_approach ** 2 / (2.0 * acc_scale + 1e-8)  # (k,)
+    k_dynamic_margin = safety_margin + k_braking_dist  # (k,)
+
+    k_base_r = jnp.where(k_isobs, r, 2 * r)  # (k,)
+    k_safety_dist_sq = (k_base_r + k_dynamic_margin) ** 2  # (k,)
 
     # ===== 2. 约束值 — 取 max(g_current, g_pred), 同时保护当前和未来 =====
-    k_g_now = k_safety_dist_sq - o_dist_sq[k_idx]  # 当前约束
+    k_g_now = k_safety_dist_sq - (k_p_rel ** 2).sum(axis=-1)  # 用真实当前距离
 
     # 预测位置约束 (lookahead)
     lookahead_dt = dt * n_lookahead
-    k_rel_vel = dq[None, :] - k_vel  # (k, 2)
     k_p_rel_pred = k_p_rel + k_rel_vel * lookahead_dt  # 预测相对位置
+    # 预测约束也用动态半径
     k_g_pred = k_safety_dist_sq - (k_p_rel_pred ** 2).sum(axis=-1)
 
     # 取更危险的那个 (g 越大越危险)
@@ -445,14 +460,21 @@ def manifold_single_agent_(
     k_s_new = k_s + ds * dt
     k_s_new = jnp.maximum(k_s_new, s_min)
 
-    all_J_g = -2.0 * (q - all_obs_pos)
+    all_p_rel_all = q - all_obs_pos
     all_rel_vel = dq[None, :] - all_obs_vel
+    all_J_g = -2.0 * all_p_rel_all
     all_dg_dt = jnp.sum(all_J_g * all_rel_vel, axis=-1)
     all_isobs = jnp.arange(len(all_obs_pos)) >= n_agent
-    all_safety_sq = jnp.where(
-        all_isobs, (r + safety_margin) ** 2, (2 * r + safety_margin) ** 2)
-    all_g_now = all_safety_sq - ((q - all_obs_pos) ** 2).sum(axis=-1)
-    all_p_rel_pred = (q - all_obs_pos) + all_rel_vel * lookahead_dt
+    # 动态安全半径 (与 step 1 一致)
+    all_p_rel_norm = jnp.linalg.norm(all_p_rel_all, axis=-1, keepdims=True)
+    all_p_rel_hat = all_p_rel_all / (all_p_rel_norm + 1e-8)
+    all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
+    all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
+    all_dynamic_margin = safety_margin + all_braking_dist
+    all_base_r = jnp.where(all_isobs, r, 2 * r)
+    all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
+    all_g_now = all_safety_sq - (all_p_rel_all ** 2).sum(axis=-1)
+    all_p_rel_pred = all_p_rel_all + all_rel_vel * lookahead_dt
     all_g_pred = all_safety_sq - (all_p_rel_pred ** 2).sum(axis=-1)
     all_g = jnp.maximum(all_g_now, all_g_pred)
     all_g_viab = all_g + K * all_dg_dt
@@ -522,6 +544,7 @@ def manifold_init_slack(
     safety_margin: float = 0.02,
     dt: float = 0.03,
     n_lookahead: int = 2,
+    acc_scale: float = 10.0,
 ):
     """初始化松弛变量: s = sqrt(max(-2 * g_viab_pred, s_min²))"""
     a_states = graph.type_states(type_idx=0, n_type=n_agent)
@@ -535,12 +558,18 @@ def manifold_init_slack(
         all_obs_pos = all_obs_state[:, :2]
         all_obs_vel = all_obs_state[:, 2:]
         all_isobs = jnp.arange(len(all_obs_pos)) >= n_agent
-        all_safety_sq = jnp.where(
-            all_isobs, (r + safety_margin) ** 2, (2 * r + safety_margin) ** 2)
-        # 当前约束 + 预测约束取 max
+        # 动态安全半径: 基于接近速度的刹车距离
         all_p_rel = q - all_obs_pos
-        all_g_now = all_safety_sq - (all_p_rel ** 2).sum(axis=-1)
         all_rel_vel = dq[None, :] - all_obs_vel
+        all_p_rel_norm = jnp.linalg.norm(all_p_rel, axis=-1, keepdims=True)
+        all_p_rel_hat = all_p_rel / (all_p_rel_norm + 1e-8)
+        all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
+        all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
+        all_dynamic_margin = safety_margin + all_braking_dist
+        all_base_r = jnp.where(all_isobs, r, 2 * r)
+        all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
+        # 当前约束 + 预测约束取 max
+        all_g_now = all_safety_sq - (all_p_rel ** 2).sum(axis=-1)
         lookahead_dt = dt * n_lookahead
         all_p_rel_pred = all_p_rel + all_rel_vel * lookahead_dt
         all_g_pred = all_safety_sq - (all_p_rel_pred ** 2).sum(axis=-1)
@@ -602,6 +631,7 @@ def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float =
         safety_margin=safety_margin,
         dt=dt,
         n_lookahead=n_lookahead,
+        acc_scale=acc_scale,
     )
 
     return manifold_fn, init_slack_fn
