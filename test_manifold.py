@@ -336,7 +336,7 @@ def test(args):
     for ii, (rollout, Ta_is_unsafe) in enumerate(zip(rollouts, is_unsafes)):
         safe_rate = rates[ii] * 100
         # 只生成不是 100% safe 的 episode 的视频
-        if safe_rate >= 100.0:
+        if safe_rate >= 1000.0:
             continue
         n_unsafe_videos += 1
         video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.7f}_cost{costs[ii]:.7f}_sr{safe_rate:.0f}"
@@ -364,7 +364,7 @@ def main():
 
     # test parameters
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=1000)
+    parser.add_argument("--epi", type=int, default=10)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)

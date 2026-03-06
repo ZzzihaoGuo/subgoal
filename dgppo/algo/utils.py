@@ -361,7 +361,9 @@ def manifold_single_agent_(
     k_braking_dist = k_v_approach ** 2 / (2.0 * acc_scale + 1e-8)  # (k,)
     k_dynamic_margin = safety_margin + k_braking_dist  # (k,)
 
-    k_base_r = jnp.where(k_isobs, r, 2 * r)  # (k,)
+    # agent-agent: 1.05r (双方各 1.05r, 总共 2.1r, 仅比碰撞距离 2r 多 5% 缓冲)
+    # agent-obs: r (obs 不会主动避让, 全靠自己)
+    k_base_r = jnp.where(k_isobs, r, 1.05 * r)
     k_safety_dist_sq = (k_base_r + k_dynamic_margin) ** 2  # (k,)
 
     # ===== 2. 约束值 — 取 max(g_current, g_pred), 同时保护当前和未来 =====
@@ -403,21 +405,23 @@ def manifold_single_agent_(
     k_psi_raw = k_dg_dt + K * k_dJdt_dq
     k_psi = jnp.maximum(k_psi_raw, 0.0) * active_f  # (k,)
 
-    # ===== 8. 解析 pseudo-inverse (damped, 加权) — 替代 SVD, 训练时快很多 =====
-    # 加权: slack 变化代价 = w_slack 倍 action 变化代价
+    # ===== 8. 加权 pseudo-inverse + null space =====
+    # 距离自适应 slack 权重: 近处约束 slack 代价更高 → 迫使用 action 修正
+    k_dist = jnp.linalg.norm(k_p_rel, axis=-1)  # (k,)
+    k_w_slack = w_slack * jnp.maximum(1.0, 0.1 / (k_dist + 1e-4))
     W_inv = jnp.ones(dim_q + k)
-    W_inv = W_inv.at[dim_q:].set(1.0 / w_slack)
+    W_inv = W_inv.at[dim_q:].set(1.0 / k_w_slack)
     Jc_w = Jc * W_inv[None, :]  # (k, 2+k)
 
-    # J⁺ = Jᵀ(JJᵀ + λI)⁻¹ — 只需 k×k 矩阵求逆, 比 SVD 快
+    # 解析 pseudo-inverse: J⁺ = Jᵀ(JJᵀ + λI)⁻¹
     lambda_sq = 0.01
     JJT = Jc_w @ Jc_w.T + lambda_sq * jnp.eye(k)  # (k, k)
     JJT_inv = jnp.linalg.inv(JJT)  # (k, k) — k=3, 极快
     Jc_w_pinv = Jc_w.T @ JJT_inv  # (2+k, k)
     Jc_pinv = W_inv[:, None] * Jc_w_pinv  # (2+k, k) 还原加权
 
-    # Null space 投影矩阵: P = I - J⁺J (在加权空间)
-    P = jnp.eye(dim_q + k) - Jc_pinv @ Jc  # (2+k, 2+k)
+    # Null space: 在加权空间计算, 再还原
+    P_w = jnp.eye(dim_q + k) - Jc_w_pinv @ Jc_w  # (2+k, 2+k) 加权空间投影
 
     # ===== 9. ATACOM 特解 =====
     a_comp = -Jc_pinv @ k_psi  # (2+k,)
@@ -426,8 +430,11 @@ def manifold_single_agent_(
 
     # ===== 10. Null space 投影 + 法向/切向分解 =====
     target = u_ref - (a_comp[:dim_q] + err[:dim_q])  # (2,)
-    target_full = jnp.zeros(dim_q + k).at[:dim_q].set(target)  # (2+k,)
-    b_proj = P @ target_full  # (2+k,) — 投影到 null space
+    # 在加权空间投影, 再还原
+    target_w = jnp.zeros(dim_q + k).at[:dim_q].set(target)  # action dims only
+    target_w = target_w / W_inv  # 转到加权空间
+    b_proj_w = P_w @ target_w  # 在加权空间投影
+    b_proj = b_proj_w * W_inv  # 还原到原空间
     # 限幅
     b_norm = jnp.linalg.norm(b_proj[:dim_q])
     b_proj = jnp.where(b_norm > alpha_max, b_proj * alpha_max / (b_norm + 1e-8), b_proj)
@@ -442,8 +449,8 @@ def manifold_single_agent_(
     b_normal_coeff = jnp.dot(b_action, normal_dir)  # >0 = 朝向障碍物
     b_tangent = b_action - b_normal_coeff * normal_dir
 
-    # 朝向障碍物的分量限制到 10%, 远离障碍物的分量保留
-    b_normal_safe = jnp.where(b_normal_coeff > 0, 0.1 * b_normal_coeff, b_normal_coeff)
+    # 朝向障碍物的法向分量完全归零, 只保留切向 (绕行) 和远离方向
+    b_normal_safe = jnp.where(b_normal_coeff > 0, 0.0, b_normal_coeff)
     b_action_safe = b_tangent + b_normal_safe * normal_dir
 
     # 只在有活跃约束时应用限制
@@ -471,7 +478,7 @@ def manifold_single_agent_(
     all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
     all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
     all_dynamic_margin = safety_margin + all_braking_dist
-    all_base_r = jnp.where(all_isobs, r, 2 * r)
+    all_base_r = jnp.where(all_isobs, r, 1.05 * r)
     all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
     all_g_now = all_safety_sq - (all_p_rel_all ** 2).sum(axis=-1)
     all_p_rel_pred = all_p_rel_all + all_rel_vel * lookahead_dt
@@ -566,7 +573,7 @@ def manifold_init_slack(
         all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
         all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
         all_dynamic_margin = safety_margin + all_braking_dist
-        all_base_r = jnp.where(all_isobs, r, 2 * r)
+        all_base_r = jnp.where(all_isobs, r, 1.05 * r)
         all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
         # 当前约束 + 预测约束取 max
         all_g_now = all_safety_sq - (all_p_rel ** 2).sum(axis=-1)
