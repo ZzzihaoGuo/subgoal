@@ -5,3 +5,5 @@ wandb
 logs
 media
 *.egg-info
+train.log
+nohup.out
