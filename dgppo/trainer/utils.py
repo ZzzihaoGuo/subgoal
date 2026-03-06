@@ -23,10 +23,10 @@ else:
 GOAL_REWARD_COEF = 0.2          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
-SUBGOAL_BONUS_COEF = 0.02       # subgoal_bonus 系数
+SUBGOAL_BONUS_COEF = 0.00001       # subgoal_bonus 系数
 DIST_TO_GOAL_COEF = 0.05        # dist_agent_to_goal 系数
 
-SUBGOAL_SHADOW_COEF = 3       # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）
+SUBGOAL_SHADOW_COEF = 0       # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）
 # ===================================================================
 
 
