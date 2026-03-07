@@ -23,7 +23,7 @@ run_test() {
 
     echo ">>> Running: $sweep_name | n=$n_agents, obs=$n_obs"
 
-    output=$(python test.py --path "$PATH_MODEL" -n "$n_agents" --obs "$n_obs" \
+    output=$(python test_manifold.py --path "$PATH_MODEL" -n "$n_agents" --obs "$n_obs" \
         --epi "$EPI" --no-video 2>&1)
 
     summary=$(echo "$output" | grep "^reward:")

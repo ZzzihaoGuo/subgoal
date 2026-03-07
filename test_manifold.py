@@ -350,7 +350,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_212001549_UBBT")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_306221349_CDNE")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
@@ -363,10 +363,10 @@ def main():
     parser.add_argument("--w-slack", type=float, default=10.0, help="Slack weight in pseudo-inverse (higher = prefer action correction)")
 
     # test parameters
-    parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=10)
+    parser.add_argument("--no-video", action="store_true", default=True)
+    parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
-    parser.add_argument("--obs", type=int, default=None)
+    parser.add_argument("--obs", type=int, default=15)
     parser.add_argument("--stochastic", action="store_true", default=False)
     parser.add_argument("--full-observation", action="store_true", default=False)
     parser.add_argument("--debug", action="store_true", default=False)

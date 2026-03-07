@@ -200,11 +200,11 @@ def main():
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--viab-gain", type=float, default=0.2)
+    parser.add_argument("--viab-gain", type=float, default=0.5)
     parser.add_argument("--err-gain", type=float, default=30.0)
     parser.add_argument("--alpha-max", type=float, default=3.0)
-    parser.add_argument("--g-act-thresh", type=float, default=0.01)
-    parser.add_argument("--safety-margin", type=float, default=0.01)
+    parser.add_argument("--g-act-thresh", type=float, default=0.02)
+    parser.add_argument("--safety-margin", type=float, default=0.02)
     parser.add_argument("--n-lookahead", type=int, default=0)
     parser.add_argument("--w-slack", type=float, default=10.0)
 
