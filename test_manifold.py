@@ -350,20 +350,20 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_212001549_UBBT")
+    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
-    parser.add_argument("--viab-gain", type=float, default=0.5, help="Viability constraint gain K (controls activation distance)")
+    parser.add_argument("--viab-gain", type=float, default=0.3, help="Viability constraint gain K (controls activation distance)")
     parser.add_argument("--err-gain", type=float, default=30.0, help="Error correction gain Kc (need Kc*dt<1, dt=0.03→Kc<33)")
     parser.add_argument("--alpha-max", type=float, default=3.0, help="Null space control bound (ATACOM alpha_max)")
-    parser.add_argument("--g-act-thresh", type=float, default=0.02, help="Constraint activation threshold")
-    parser.add_argument("--safety-margin", type=float, default=0.02, help="Safety margin beyond collision boundary")
-    parser.add_argument("--n-lookahead", type=int, default=0, help="Predictive constraint lookahead steps")
-    parser.add_argument("--w-slack", type=float, default=10.0, help="Slack weight in pseudo-inverse (higher = prefer action correction)")
+    parser.add_argument("--g-act-thresh", type=float, default=0.01, help="Constraint activation threshold")
+    parser.add_argument("--safety-margin", type=float, default=0.01, help="Safety margin beyond collision boundary")
+    parser.add_argument("--n-lookahead", type=int, default=2, help="Predictive constraint lookahead steps")
+    parser.add_argument("--w-slack", type=float, default=1.0, help="Slack weight in pseudo-inverse (higher = prefer action correction)")
 
     # test parameters
-    parser.add_argument("--no-video", action="store_true", default=False)
+    parser.add_argument("--no-video", action="store_true", default=True)
     parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)

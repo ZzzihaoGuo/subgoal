@@ -1,9 +1,9 @@
 #!/bin/bash
 # Sweep test: vary num_agents and obs, collect results
 
-PATH_MODEL="${1:-logs/LidarSpread/informarl_subgoal/seed0_212001549_UBBT}"
+PATH_MODEL="${1:-logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB}"
 EPI="${2:-1000}"
-RESULT_FILE="sweep_results.txt"
+RESULT_FILE="sweep_results_manifold.txt"
 
 echo "=== Sweep Test ===" | tee "$RESULT_FILE"
 echo "Model path: $PATH_MODEL" | tee -a "$RESULT_FILE"
@@ -23,7 +23,7 @@ run_test() {
 
     echo ">>> Running: $sweep_name | n=$n_agents, obs=$n_obs"
 
-    output=$(python test.py --path "$PATH_MODEL" -n "$n_agents" --obs "$n_obs" \
+    output=$(python test_manifold.py --path "$PATH_MODEL" -n "$n_agents" --obs "$n_obs" \
         --epi "$EPI" --no-video 2>&1)
 
     summary=$(echo "$output" | grep "^reward:")

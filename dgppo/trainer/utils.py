@@ -20,13 +20,13 @@ else:
 
 
 # ============ Sparse Reward 系数配置（train 和 test 共用）============
-GOAL_REWARD_COEF = 0.2          # goal_reward 系数
+GOAL_REWARD_COEF = 0.1          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
 SUBGOAL_BONUS_COEF = 0.001       # subgoal_bonus 系数
-DIST_TO_GOAL_COEF = 0.02        # dist_agent_to_goal 系数
+DIST_TO_GOAL_COEF = 0.1        # dist_agent_to_goal 系数
 
-SUBGOAL_SHADOW_COEF = 3       # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1
+SUBGOAL_SHADOW_COEF = 0.00001       # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1
 # ===================================================================
 
 
@@ -183,6 +183,104 @@ def rollout_hierarchical(
     )
 
     return rollout_data
+
+def rollout_hierarchical_manifold(
+        env: MultiAgentEnv,
+        high_level_actor: Callable,
+        init_rnn_state: Array,
+        key: PRNGKey,
+        subgoal_interval: int = 40,
+        reach_thresh: float = 0.1,
+) -> Rollout:
+    """
+    Hierarchical rollout with manifold (ATACOM) safety:
+    高层每 subgoal_interval 步生成 subgoal，低层用 manifold 修正的 u_ref 跟踪
+    carry 中传递松弛变量 s_all 实现 ATACOM 积分
+    """
+    key_x0, key = jax.random.split(key)
+    init_graph = env.reset(key_x0)
+
+    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_s_all = env.manifold_init_slack(init_graph)
+
+    def body_(data, inp):
+        graph, rnn_state, current_subgoal, step_count, s_all = data
+        key_ = inp
+
+        # === 高层决策 ===
+        should_update = (step_count % subgoal_interval == 0)
+        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+
+        def update_subgoal(_):
+            new_sg, log_p, new_rnn = high_level_actor(graph, rnn_state, key_)
+            return new_sg, log_p, new_rnn
+
+        def keep_subgoal(_):
+            return current_subgoal, jnp.zeros((env.num_agents,)), rnn_state
+
+        new_subgoal, log_pi, new_rnn_state = jax.lax.cond(
+            should_update, update_subgoal, keep_subgoal, operand=None
+        )
+
+        remaining_steps = env.max_episode_steps - step_count
+        is_last_subgoal = remaining_steps <= subgoal_interval
+
+        # === 低层: LQR → manifold 安全修正 (带松弛变量积分) ===
+        nominal_action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        action, _, s_new, _ = env.get_manifold_action(graph, u_ref=nominal_action, s_all=s_all)
+        action = env.clip_action(action)
+
+        # 环境交互
+        next_graph, reward, cost, done, info = env.step(graph, action)
+
+        # === 稀疏奖励 ===
+        agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
+        agent_pos = agent_states[:, :2]
+        goal_pos = real_goal[:, :2]
+        dist2goal = jnp.linalg.norm(
+            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
+        ).min(axis=1)
+
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
+        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)
+        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
+
+        save_data = should_update
+
+        return (next_graph, new_rnn_state, new_subgoal, step_count + 1, s_new), (
+            graph, new_subgoal, rnn_state, reward, cost, done, log_pi,
+            next_graph, save_data, sparse_reward,
+        )
+
+    keys = jax.random.split(key, env.max_episode_steps)
+    init_data = (init_graph, init_rnn_state, init_subgoal, 0, init_s_all)
+
+    _, outputs = jax.lax.scan(body_, init_data, keys, length=env.max_episode_steps)
+
+    graphs, subgoals, rnn_states, rewards, costs, dones, log_pis, next_graphs, save_mask, sparse_rewards = outputs
+
+    # === 筛选出高层决策点的数据 ===
+    high_level_indices = jnp.arange(0, env.max_episode_steps, subgoal_interval)
+    reward_end_indices = jnp.minimum(high_level_indices + subgoal_interval - 1, env.max_episode_steps - 1)
+
+    rollout_data = Rollout(
+        graph=jax.tree.map(lambda x: x[high_level_indices], graphs),
+        actions=subgoals[high_level_indices],
+        rnn_states=jax.tree.map(lambda x: x[high_level_indices], rnn_states),
+        rewards=rewards[high_level_indices],
+        costs=costs[high_level_indices],
+        dones=dones[high_level_indices],
+        log_pis=log_pis[high_level_indices],
+        next_graph=jax.tree.map(lambda x: x[reward_end_indices], next_graphs),
+        sparse_rewards=sparse_rewards[reward_end_indices],
+    )
+
+    return rollout_data
+
 
 def rollout(
         env: MultiAgentEnv,
@@ -415,6 +513,117 @@ def test_rollout_subgoal(
         )
 
     return rollout_data
+
+
+def test_rollout_subgoal_manifold(
+        env: MultiAgentEnv,
+        actor: Callable,
+        init_rnn_state: Array,
+        key: PRNGKey,
+        stochastic: bool = False,
+        subgoal_interval: int = 40,
+        filter_high_level: bool = False,
+        reach_thresh: float = 0.1,
+):
+    """测试层级RL的rollout函数 (manifold 安全版本)"""
+    key_x0, key = jax.random.split(key)
+    init_graph = env.reset(key_x0)
+
+    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_s_all = env.manifold_init_slack(init_graph)
+
+    def body_(data, inp_data):
+        graph, rnn_state, current_subgoal, step_count, s_all = data
+        key_ = inp_data
+
+        should_update = (step_count % subgoal_interval == 0)
+        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+
+        def update_subgoal(_):
+            if stochastic:
+                new_sg, rnn = actor(graph, rnn_state, key_)
+                return new_sg, rnn
+            else:
+                new_sg, rnn = actor(graph, rnn_state)
+                return new_sg, rnn
+
+        def keep_subgoal(_):
+            return current_subgoal, rnn_state
+
+        new_subgoal, new_rnn_state = jax.lax.cond(
+            should_update, update_subgoal, keep_subgoal, operand=None
+        )
+
+        remaining_steps = env.max_episode_steps - step_count
+        is_last_subgoal = remaining_steps <= subgoal_interval
+
+        # === 低层: LQR → manifold 安全修正 ===
+        nominal_action = env.u_ref(graph, target_pos=new_subgoal, is_final_goal=is_last_subgoal)
+        action, _, s_new, _ = env.get_manifold_action(graph, u_ref=nominal_action, s_all=s_all)
+        action = env.clip_action(action)
+
+        next_graph, reward, cost, done, info = env.step(graph, action)
+
+        # === 稀疏奖励 ===
+        agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
+        agent_pos = agent_states[:, :2]
+        goal_pos = real_goal[:, :2]
+        dist2goal = jnp.linalg.norm(
+            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
+        ).min(axis=1)
+
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
+        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)
+        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+        sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
+
+        return (next_graph, new_rnn_state, new_subgoal, step_count + 1, s_new), (
+            graph, new_subgoal, rnn_state, reward, cost, done,
+            None, next_graph, sparse_reward, dist2goal,
+        )
+
+    keys = jax.random.split(key, env.max_episode_steps)
+    init_data = (init_graph, init_rnn_state, init_subgoal, 0, init_s_all)
+
+    _, (graphs, actions, actor_rnn_states, rewards, costs, dones,
+        log_pis, next_graphs, sparse_rewards, dist2goals) = (
+        jax.lax.scan(body_, init_data, keys, length=env.max_episode_steps))
+
+    if filter_high_level:
+        high_level_indices = jnp.arange(0, env.max_episode_steps, subgoal_interval)
+        reward_end_indices = jnp.minimum(high_level_indices + subgoal_interval - 1, env.max_episode_steps - 1)
+
+        rollout_data = Rollout(
+            graph=jax.tree.map(lambda x: x[high_level_indices], graphs),
+            actions=actions[high_level_indices],
+            rnn_states=jax.tree.map(lambda x: x[high_level_indices], actor_rnn_states),
+            rewards=rewards[high_level_indices],
+            costs=costs[high_level_indices],
+            dones=dones[high_level_indices],
+            log_pis=None,
+            next_graph=jax.tree.map(lambda x: x[reward_end_indices], next_graphs),
+            sparse_rewards=sparse_rewards[reward_end_indices],
+            dist2goal=dist2goals[reward_end_indices],
+        )
+    else:
+        rollout_data = Rollout(
+            graph=graphs,
+            actions=actions,
+            rnn_states=actor_rnn_states,
+            rewards=rewards,
+            costs=costs,
+            dones=dones,
+            log_pis=None,
+            next_graph=next_graphs,
+            sparse_rewards=sparse_rewards,
+            dist2goal=dist2goals,
+        )
+
+    return rollout_data
+
 
 def has_nan(x):
     return jtu.tree_map(lambda y: jnp.isnan(y).any(), x)

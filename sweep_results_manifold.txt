@@ -1,0 +1,17 @@
+=== Sweep Test ===
+Model path: logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB
+Episodes per config: 1000
+Started at: Wed Mar 11 01:32:52 AM UTC 2026
+
+sweep        n      obs    reward       cost         last_dist    safe_rate    success_agent    success_epi     
+========================================================================================================================
+
+--- Sweep 1: fixed obs=3, vary num_agents ---
+vary_n       3      3      -0.2217715
+-0.7089200
+-0.0002988 -0.5386544
+-0.8071943 0.0186866    99.0666667%  88.9333333%      69.9000000%     
+vary_n       5      3      -0.2145874
+-0.5126798
+-0.0007623 -0.4907546
+-0.6804655 0.0467123    98.9200000%  70.6800000%      10.7000000%     
