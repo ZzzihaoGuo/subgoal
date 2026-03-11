@@ -357,8 +357,9 @@ def manifold_single_agent_(
     k_p_rel_hat = k_p_rel / (k_p_rel_norm + 1e-8)  # (k, 2) 单位方向
     # 接近速度 (正值 = 在靠近)
     k_v_approach = jnp.maximum(0.0, -jnp.sum(k_rel_vel * k_p_rel_hat, axis=-1))  # (k,)
-    # 刹车距离 = v² / (2 * a_max), a_max = acc_scale * action_clip(1.0)
-    k_braking_dist = k_v_approach ** 2 / (2.0 * acc_scale + 1e-8)  # (k,)
+    # 刹车距离 = v² / (2 * a_max), agent-agent 双方都能刹车所以有效减速力翻倍
+    k_effective_decel = jnp.where(k_isobs, acc_scale, 2.0 * acc_scale)
+    k_braking_dist = k_v_approach ** 2 / (2.0 * k_effective_decel + 1e-8)  # (k,)
     k_dynamic_margin = safety_margin + k_braking_dist  # (k,)
 
     k_base_r = jnp.where(k_isobs, r, 2 * r)  # (k,)
@@ -381,7 +382,9 @@ def manifold_single_agent_(
 
     # ===== 4. Viability constraint =====
     k_dg_dt = jnp.sum(k_J_g * k_rel_vel, axis=-1)  # (k,) J_g @ (dq - v_j)
-    k_g_viab = k_g + K * k_dg_dt  # (k,)
+    # agent-agent 用更小的 K: 对方也会主动避让, 不需要那么灵敏
+    k_K = jnp.where(k_isobs, K, K * 0.5)
+    k_g_viab = k_g + k_K * k_dg_dt  # (k,)
 
     # ===== 5. 松弛变量 =====
     k_s = s_prev[k_idx]  # (k,)
@@ -469,7 +472,8 @@ def manifold_single_agent_(
     all_p_rel_norm = jnp.linalg.norm(all_p_rel_all, axis=-1, keepdims=True)
     all_p_rel_hat = all_p_rel_all / (all_p_rel_norm + 1e-8)
     all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
-    all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
+    all_effective_decel = jnp.where(all_isobs, acc_scale, 2.0 * acc_scale)
+    all_braking_dist = all_v_approach ** 2 / (2.0 * all_effective_decel + 1e-8)
     all_dynamic_margin = safety_margin + all_braking_dist
     all_base_r = jnp.where(all_isobs, r, 2 * r)
     all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
@@ -477,7 +481,8 @@ def manifold_single_agent_(
     all_p_rel_pred = all_p_rel_all + all_rel_vel * lookahead_dt
     all_g_pred = all_safety_sq - (all_p_rel_pred ** 2).sum(axis=-1)
     all_g = jnp.maximum(all_g_now, all_g_pred)
-    all_g_viab = all_g + K * all_dg_dt
+    all_K = jnp.where(all_isobs, K, K * 0.5)
+    all_g_viab = all_g + all_K * all_dg_dt
     all_s_ideal = jnp.sqrt(jnp.maximum(-2.0 * all_g_viab, s_min ** 2))
     s_new = all_s_ideal
     s_new = s_new.at[k_idx].set(k_s_new)
@@ -564,7 +569,8 @@ def manifold_init_slack(
         all_p_rel_norm = jnp.linalg.norm(all_p_rel, axis=-1, keepdims=True)
         all_p_rel_hat = all_p_rel / (all_p_rel_norm + 1e-8)
         all_v_approach = jnp.maximum(0.0, -jnp.sum(all_rel_vel * all_p_rel_hat, axis=-1))
-        all_braking_dist = all_v_approach ** 2 / (2.0 * acc_scale + 1e-8)
+        all_effective_decel = jnp.where(all_isobs, acc_scale, 2.0 * acc_scale)
+        all_braking_dist = all_v_approach ** 2 / (2.0 * all_effective_decel + 1e-8)
         all_dynamic_margin = safety_margin + all_braking_dist
         all_base_r = jnp.where(all_isobs, r, 2 * r)
         all_safety_sq = (all_base_r + all_dynamic_margin) ** 2
@@ -576,7 +582,8 @@ def manifold_init_slack(
         all_g = jnp.maximum(all_g_now, all_g_pred)
         all_J_g = -2.0 * all_p_rel
         all_dg_dt = jnp.sum(all_J_g * all_rel_vel, axis=-1)
-        all_g_viab = all_g + K * all_dg_dt
+        all_K = jnp.where(all_isobs, K, K * 0.5)
+        all_g_viab = all_g + all_K * all_dg_dt
         s = jnp.sqrt(jnp.maximum(-2.0 * all_g_viab, s_min ** 2))
         return s
 

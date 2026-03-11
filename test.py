@@ -257,7 +257,7 @@ def main():
     parser.add_argument("--no-video", action="store_true", default=True)
     parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
-    parser.add_argument("--obs", type=int, default=0)
+    parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
     parser.add_argument("--full-observation", action="store_true", default=False)
     parser.add_argument("--debug", action="store_true", default=False)
@@ -289,7 +289,7 @@ def main():
                         help="Max delta for relative subgoal (overrides config if set)")
 
     # default arguments
-    parser.add_argument("-n", "--num-agents", type=int, default=7)
+    parser.add_argument("-n", "--num-agents", type=int, default=5)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--env", type=str, default=None)
     parser.add_argument("--offset", type=int, default=0)

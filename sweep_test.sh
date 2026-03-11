@@ -1,7 +1,7 @@
 #!/bin/bash
 # Sweep test: vary num_agents and obs, collect results
 
-PATH_MODEL="${1:-logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB}"
+PATH_MODEL="${1:-logs/LidarSpread/informarl_subgoal/seed0_212001549_UBBT}"
 EPI="${2:-1000}"
 RESULT_FILE="sweep_results_manifold.txt"
 
