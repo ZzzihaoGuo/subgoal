@@ -95,6 +95,11 @@ class LidarEnv(MultiAgentEnv, ABC):
         self._safe_u_ref_jit = None  # JIT: CBF + QP
         self._get_min_lidar_dist_jit = None  # JIT: LiDAR 距离计算
 
+    def state_to_pos_vel(self, state: Array) -> Array:
+        """Convert state to [x, y, vx, vy] for manifold/CBF safety layer.
+        Override in subclasses with different state representations."""
+        return state  # default: state is already [x, y, vx, vy]
+
     @property
     def state_dim(self) -> int:
         return 4  # x, y, vx, vy
@@ -398,6 +403,12 @@ class LidarEnv(MultiAgentEnv, ABC):
         assert f.shape == state.shape
         assert g.shape == (state.shape[0], self.state_dim, self.action_dim)
         return f, g
+
+    def get_agent_goals(self, graph: GraphsTuple) -> Array:
+        """获取每个 agent 对应的目标位置, shape (num_agents, 2)
+        默认直接从 graph 取 goal 节点。LidarLine 等环境可覆写此方法。
+        """
+        return graph.type_states(type_idx=1, n_type=self.num_goals)[:, :2]
 
     def u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
         agent = graph.type_states(type_idx=0, n_type=self.num_agents)
@@ -800,7 +811,8 @@ class LidarEnv(MultiAgentEnv, ABC):
             self._manifold, self._manifold_init_slack = get_manifold_fn(
                 self, k=k, K=K, Kc=Kc, s_min=s_min,
                 alpha_max=alpha_max, g_act_thresh=g_act_thresh,
-                safety_margin=safety_margin, n_lookahead=n_lookahead, w_slack=w_slack)
+                safety_margin=safety_margin, n_lookahead=n_lookahead, w_slack=w_slack,
+                state_to_pos_vel=self.state_to_pos_vel)
         return self
 
     def manifold_init_slack(self, graph: GraphsTuple):
@@ -834,7 +846,9 @@ class LidarEnv(MultiAgentEnv, ABC):
         if self._manifold is None:
             raise RuntimeError("Must call init_manifold() before using get_manifold_action")
         u_opt, relax, s_new, debug_info = self._manifold(graph, u_ref, s_all)
+
         return u_opt, relax, s_new, debug_info
+        # return u_ref, relax, s_new, debug_info
 
     def _safe_u_ref_impl_closed_form(self, graph: GraphsTuple, target_pos: Array, is_final_goal: bool) -> Action:
         """使用闭式解的 safe_u_ref"""

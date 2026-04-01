@@ -12,11 +12,15 @@ logger.disable("jaxproxqp")
 from dgppo.algo import make_algo
 from dgppo.env import make_env
 from dgppo.trainer.trainer_subgoal_manifold import Trainer
+from dgppo.trainer import utils as trainer_utils
 from dgppo.trainer.utils import is_connected
 
 
 def train(args):
     print(f"> Running train_try_manifold.py {args}")
+
+    # 用命令行参数覆盖 utils.py 中的全局系数
+    trainer_utils.SUBGOAL_SHADOW_COEF = args.subgoal_shadow_coef
 
     # set up environment variables and seed
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
@@ -193,14 +197,14 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, default="LidarSpread")
+    parser.add_argument("--env", type=str, default="LidarLine") #LidarLine; LidarTarget; LidarSpread
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--algo", type=str, default="informarl_subgoal")
     parser.add_argument("--obs", type=int, default=3)
 
-    # manifold (ATACOM) parameters
+    # manifold parameters
     parser.add_argument("--topk", type=int, default=3)
-    parser.add_argument("--viab-gain", type=float, default=0.5)
+    parser.add_argument("--viab-gain", type=float, default=0.5)   
     parser.add_argument("--err-gain", type=float, default=30.0)
     parser.add_argument("--alpha-max", type=float, default=3.0)
     parser.add_argument("--g-act-thresh", type=float, default=0.02)
@@ -208,9 +212,18 @@ def main():
     parser.add_argument("--n-lookahead", type=int, default=0)
     parser.add_argument("--w-slack", type=float, default=10.0)
 
+    # parser.add_argument("--topk", type=int, default=3)
+    # parser.add_argument("--viab-gain", type=float, default=0.5)   
+    # parser.add_argument("--err-gain", type=float, default=30.0)
+    # parser.add_argument("--alpha-max", type=float, default=1000)
+    # parser.add_argument("--g-act-thresh", type=float, default=100)
+    # parser.add_argument("--safety-margin", type=float, default=-100)
+    # parser.add_argument("--n-lookahead", type=int, default=0)
+    # parser.add_argument("--w-slack", type=float, default=0.0)
+
     # custom arguments
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--steps", type=int, default=200000)
+    parser.add_argument("--steps", type=int, default=400000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cost-weight", type=float, default=0.)
@@ -227,6 +240,7 @@ def main():
     # Subgoal mode arguments
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
     parser.add_argument("--max-delta", type=float, default=0.2)
+    parser.add_argument("--subgoal-shadow-coef", type=float, default=1.0)  ## need to search
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)

@@ -23,11 +23,34 @@ else:
 GOAL_REWARD_COEF = 0.1          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
-SUBGOAL_BONUS_COEF = 0.001       # subgoal_bonus 系数
+SUBGOAL_BONUS_COEF = 0.0001       # subgoal_bonus 系数
 DIST_TO_GOAL_COEF = 0.1        # dist_agent_to_goal 系数
 
-SUBGOAL_SHADOW_COEF = 0.00001     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1
+SUBGOAL_SHADOW_COEF = 0.01     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1  # 可通过 --subgoal-shadow-coef 覆盖
 # ===================================================================
+
+
+def _compute_dist2goal(env, goal_pos, agent_pos):
+    """根据环境类型计算 dist2goal。
+    matched: agent_i 对应 goal_i（LidarTarget 等）
+    spread: 每个 goal 找最近 agent（LidarSpread 等）
+    """
+    mode = getattr(env, 'GOAL_ASSIGNMENT', 'spread')
+    if mode == 'spread':
+        # 每个 goal 找最近的 agent
+        return jnp.linalg.norm(
+            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
+        ).min(axis=1)
+    elif mode == 'line':
+        # 每个 goal 找最近的 agent
+        return jnp.linalg.norm(
+            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
+        ).min(axis=1)
+    elif mode == 'target':
+        # agent_i 对应 goal_i
+        return jnp.linalg.norm(goal_pos - agent_pos, axis=-1)
+    else:
+        raise ValueError(f"Unknown GOAL_ASSIGNMENT: {mode}")
 
 
 def rollout_hierarchical(
@@ -58,7 +81,7 @@ def rollout_hierarchical(
     init_graph = env.reset(key_x0)
     
     # 初始化：第一个subgoal就是最终目标
-    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]  # (n_agents, 2)
+    init_subgoal = env.get_agent_goals(init_graph)  # (n_agents, 2)
     
     def body_(data, inp):
         graph, rnn_state, current_subgoal, step_count = data
@@ -66,7 +89,7 @@ def rollout_hierarchical(
         
         # === 高层决策：每 subgoal_interval 步生成新的subgoal ===
         should_update = (step_count % subgoal_interval == 0)
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        real_goal = env.get_agent_goals(graph)
 
         def update_subgoal(_):
             new_sg, log_p, new_rnn = high_level_actor(graph, rnn_state, key_)
@@ -117,8 +140,9 @@ def rollout_hierarchical(
 
         # 1. 到达最终目标的奖励 (使用动态阈值)
         goal_pos = real_goal[:, :2]
-        dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
+        dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
         goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
 
         # 2. 到达 subgoal 的奖励 (鼓励生成可达的 subgoal)
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
@@ -200,7 +224,7 @@ def rollout_hierarchical_manifold(
     key_x0, key = jax.random.split(key)
     init_graph = env.reset(key_x0)
 
-    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_subgoal = env.get_agent_goals(init_graph)
     init_s_all = env.manifold_init_slack(init_graph)
 
     def body_(data, inp):
@@ -209,7 +233,7 @@ def rollout_hierarchical_manifold(
 
         # === 高层决策 ===
         should_update = (step_count % subgoal_interval == 0)
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        real_goal = env.get_agent_goals(graph)
 
         def update_subgoal(_):
             new_sg, log_p, new_rnn = high_level_actor(graph, rnn_state, key_)
@@ -237,11 +261,11 @@ def rollout_hierarchical_manifold(
         agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
         agent_pos = agent_states[:, :2]
         goal_pos = real_goal[:, :2]
-        dist2goal = jnp.linalg.norm(
-            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
-        ).min(axis=1)
+        dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
         goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
         subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
         dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
@@ -377,7 +401,7 @@ def test_rollout_subgoal(
     init_graph = env.reset(key_x0)
 
     # 初始化：第一个subgoal就是最终目标
-    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_subgoal = env.get_agent_goals(init_graph)
 
     def body_(data, inp_data):
         graph, rnn_state, current_subgoal, step_count = data
@@ -385,7 +409,7 @@ def test_rollout_subgoal(
 
         # === 高层决策：每 subgoal_interval 步生成新的subgoal ===
         should_update = (step_count % subgoal_interval == 0)
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        real_goal = env.get_agent_goals(graph)
 
         # 使用 jax.lax.cond 替代 if/else
         def update_subgoal(_):
@@ -437,13 +461,13 @@ def test_rollout_subgoal(
         agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
         goals = real_goal
 
-        # each goal finds the nearest agent
         agent_pos = agent_states[:, :2]
         goal_pos = goals[:, :2]
-        dist2goal = jnp.linalg.norm(jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1).min(axis=1)
+        dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
         # 1. 到达最终目标的奖励 (使用 reach_thresh)
         goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
 
         # 2. 到达 subgoal 的奖励 (鼓励生成可达的 subgoal)
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
@@ -529,7 +553,7 @@ def test_rollout_subgoal_manifold(
     key_x0, key = jax.random.split(key)
     init_graph = env.reset(key_x0)
 
-    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_subgoal = env.get_agent_goals(init_graph)
     init_s_all = env.manifold_init_slack(init_graph)
 
     def body_(data, inp_data):
@@ -537,7 +561,7 @@ def test_rollout_subgoal_manifold(
         key_ = inp_data
 
         should_update = (step_count % subgoal_interval == 0)
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        real_goal = env.get_agent_goals(graph)
 
         def update_subgoal(_):
             if stochastic:
@@ -568,11 +592,11 @@ def test_rollout_subgoal_manifold(
         agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
         agent_pos = agent_states[:, :2]
         goal_pos = real_goal[:, :2]
-        dist2goal = jnp.linalg.norm(
-            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
-        ).min(axis=1)
+        dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
         goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
         subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
         dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF

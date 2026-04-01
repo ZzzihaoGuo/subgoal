@@ -13,6 +13,8 @@ from dgppo.env.lidar_env.lidar_spread import LidarSpread
 
 class LidarLine(LidarSpread):
 
+    GOAL_ASSIGNMENT = "line"
+
     PARAMS = {
         "car_radius": 0.05,
         "comm_radius": 0.5,
@@ -22,6 +24,7 @@ class LidarLine(LidarSpread):
         "default_area_size": 1.5,
         "dist2goal": 0.01,
         "top_k_rays": 8,
+        "m": 0.1,
     }
 
     def __init__(
@@ -135,6 +138,11 @@ class LidarLine(LidarSpread):
         n_interval = self.num_agents - 1
         goals = landmarks[0] + jnp.arange(0, n_interval + 1)[:, None] * direction / n_interval
         return goals
+
+    def get_agent_goals(self, graph: LidarEnvGraphsTuple) -> Array:
+        """从 2 个 landmark 插值出 num_agents 个目标位置"""
+        landmarks = graph.type_states(type_idx=1, n_type=2)[:, :2]
+        return self.landmark2goal(landmarks)
 
     def get_reward(self, graph: LidarEnvGraphsTuple, action: Action) -> Reward:
         agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)

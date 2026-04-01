@@ -32,6 +32,7 @@ class LidarBicycleTarget(LidarTarget):
         "default_area_size": 1.5,
         "dist2goal": 0.01,
         "top_k_rays": 8,
+        "m": 0.1,
     }
 
     def __init__(
@@ -43,8 +44,22 @@ class LidarBicycleTarget(LidarTarget):
             params: dict = None,
             cbf_alpha: float = 10.0
     ):
+        from dgppo.env.base import MultiAgentEnv
+        from dgppo.env.lidar_env.base import Rectangle, jax_vmap
+
         area_size = LidarBicycleTarget.PARAMS["default_area_size"] if area_size is None else area_size
-        super(LidarBicycleTarget, self).__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
+        # Skip LidarEnv.__init__ LQR (incompatible with bicycle state_dim=5),
+        # directly init MultiAgentEnv and LidarEnv's non-LQR attributes
+        MultiAgentEnv.__init__(self, num_agents, area_size, max_step, dt, params)
+
+        self.create_obstacles = jax_vmap(Rectangle.create)
+        self.num_goals = self._num_agents
+        self.cbf_alpha = cbf_alpha
+        self.k = 21
+        self._cbf = None
+        self._manifold = None
+        self._manifold_init_slack = None
+        self._safe_u_ref_jit = None
 
     @property
     def state_dim(self) -> int:
@@ -110,6 +125,13 @@ class LidarBicycleTarget(LidarTarget):
 
         assert n_state_agent_new.shape == (self.num_agents, self.state_dim)
         return self.clip_state(n_state_agent_new)
+
+    def state_to_pos_vel(self, state: Array) -> Array:
+        """Convert bicycle state [x, y, cos(θ), sin(θ), v] to [x, y, vx, vy]."""
+        pos = state[..., :2]
+        vx = state[..., 4] * state[..., 2]
+        vy = state[..., 4] * state[..., 3]
+        return jnp.concatenate([pos, vx[..., None], vy[..., None]], axis=-1)
 
     def state2feat(self, state: State) -> Array:
         vx = state[4] * state[2]
@@ -292,3 +314,56 @@ class LidarBicycleTarget(LidarTarget):
         anim_T = len(T_graph.n_node)
         ani = FuncAnimation(fig, update, frames=anim_T, init_func=init_fn, interval=mspf, blit=True)
         save_anim(ani, video_path)
+
+
+    def u_ref(self, graph: GraphsTuple, target_pos: Optional[Array] = None, is_final_goal: bool = False) -> Action:
+        agent_states = graph.type_states(type_idx=0, n_type=self.num_agents)
+        if target_pos is None:
+            goal_pos = graph.type_states(type_idx=1, n_type=self.num_agents)[:, :2]
+        else:
+            goal_pos = target_pos
+        pos_diff = agent_states[:, :2] - goal_pos
+
+        # PID parameters
+        k_omega = 1.0
+        k_v = 7.0
+        k_a = 3.0
+
+        dist = jnp.linalg.norm(pos_diff, axis=-1)
+        theta_t = jnp.arctan2(-pos_diff[:, 1], -pos_diff[:, 0])  # target direction
+        theta = jnp.arctan2(agent_states[:, 3], agent_states[:, 2])  # current heading
+
+        # forward angle error (wrapped to [-pi, pi])
+        fwd_err = jnp.arctan2(jnp.sin(theta_t - theta), jnp.cos(theta_t - theta))
+        # backward angle error: target relative to reversed heading (theta + pi)
+        bwd_err = jnp.arctan2(jnp.sin(theta_t - theta - jnp.pi), jnp.cos(theta_t - theta - jnp.pi))
+
+        # choose whichever has smaller absolute angle error
+        go_backward = jnp.abs(bwd_err) < jnp.abs(fwd_err)
+        angle_err = jnp.where(go_backward, bwd_err, fwd_err)
+        direction = jnp.where(go_backward, -1.0, 1.0)  # speed sign
+
+        # flip omega when going backward: v*omega determines turning,
+        # so negative v reverses the effect of omega
+        omega = k_omega * angle_err * direction
+        omega = jnp.clip(omega, a_min=-5., a_max=5.)
+
+        max_speed = 0.5
+        cruise_speed = max_speed * 0.8  # subgoal: keep cruising, don't stop
+
+        # final goal: slow down near target to stop precisely
+        # subgoal: maintain cruise speed, only reduce slightly when very close
+        approach_radius = 0.15
+        speed_scale = jnp.clip(dist / approach_radius, 0.15, 1.0)
+        final_speed = max_speed * speed_scale  # decelerates to ~0 at goal
+        subgoal_speed = jnp.where(dist > 0.05, max_speed, cruise_speed)  # cruise through
+
+        desired_speed = jnp.where(is_final_goal, final_speed, subgoal_speed) * direction
+        a = k_a * (desired_speed - agent_states[:, 4])
+
+        # final goal only: full brake when very close
+        near_goal = jnp.logical_and(is_final_goal, dist < self._params["dist2goal"])[:, None]
+        brake_action = jnp.concatenate([jnp.zeros_like(omega[:, None]), -k_a * agent_states[:, 4:5]], axis=-1)
+        action = jnp.concatenate([omega[:, None], a[:, None]], axis=-1)
+        action = jnp.where(near_goal, brake_action, action)
+        return self.clip_action(action)

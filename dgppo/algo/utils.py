@@ -521,10 +521,15 @@ def manifold_all_agents(
     n_lookahead: int = 2,
     acc_scale: float = 10.0,
     w_slack: float = 5.0,
+    state_to_pos_vel=None,
 ):
     """对所有 agent 并行计算 manifold 修正"""
     a_states = graph.type_states(type_idx=0, n_type=n_agent)
     obs_states = graph.type_states(type_idx=2, n_type=n_agent * n_rays)
+    # convert to [x, y, vx, vy] for manifold computation
+    if state_to_pos_vel is not None:
+        a_states = jax.vmap(state_to_pos_vel)(a_states)
+        obs_states = jax.vmap(state_to_pos_vel)(obs_states)
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     agent_idx = jnp.arange(n_agent)
@@ -550,10 +555,15 @@ def manifold_init_slack(
     dt: float = 0.03,
     n_lookahead: int = 2,
     acc_scale: float = 10.0,
+    state_to_pos_vel=None,
 ):
     """初始化松弛变量: s = sqrt(max(-2 * g_viab_pred, s_min²))"""
     a_states = graph.type_states(type_idx=0, n_type=n_agent)
     obs_states = graph.type_states(type_idx=2, n_type=n_agent * n_rays)
+    # convert to [x, y, vx, vy] for manifold computation
+    if state_to_pos_vel is not None:
+        a_states = jax.vmap(state_to_pos_vel)(a_states)
+        obs_states = jax.vmap(state_to_pos_vel)(obs_states)
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     def _init_single(state, agent_idx, o_obs_state, a_state):
@@ -596,13 +606,16 @@ def manifold_init_slack(
 
 def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float = 8.0,
                     s_min: float = 0.1, alpha_max: float = 5.0, g_act_thresh: float = 0.1,
-                    safety_margin: float = 0.02, n_lookahead: int = 2, w_slack: float = 5.0):
+                    safety_margin: float = 0.02, n_lookahead: int = 2, w_slack: float = 5.0,
+                    state_to_pos_vel=None):
     """工厂函数：创建 manifold 修正函数"""
     n_agent = env.num_agents
     n_rays = env.params["top_k_rays"]
     r = env.params["car_radius"]
     dt = env._dt
     acc_scale = 1.0 / env.params["m"]  # action → acceleration: ddq = u * acc_scale
+    if state_to_pos_vel is None:
+        state_to_pos_vel = lambda s: s  # identity by default
     max_neighbors = (n_agent - 1) + n_rays
     k = min(k, max_neighbors)
     print(f"  manifold k clamped to {k} (max_neighbors={max_neighbors})")
@@ -626,6 +639,7 @@ def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float =
         n_lookahead=n_lookahead,
         acc_scale=acc_scale,
         w_slack=w_slack,
+        state_to_pos_vel=state_to_pos_vel,
     )
 
     init_slack_fn = ft.partial(
@@ -639,6 +653,7 @@ def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float =
         dt=dt,
         n_lookahead=n_lookahead,
         acc_scale=acc_scale,
+        state_to_pos_vel=state_to_pos_vel,
     )
 
     return manifold_fn, init_slack_fn

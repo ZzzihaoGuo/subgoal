@@ -10,6 +10,8 @@ from dgppo.utils.utils import jax_vmap
 
 class LidarTarget(LidarEnv):
 
+    GOAL_ASSIGNMENT = "target"  # agent_i <-> goal_i 一一对应
+
     PARAMS = {
         "car_radius": 0.05,
         "comm_radius": 0.5,
@@ -19,6 +21,7 @@ class LidarTarget(LidarEnv):
         "default_area_size": 1.5,
         "dist2goal": 0.01,
         "top_k_rays": 8,
+        "m": 0.1,
     }
 
     def __init__(
@@ -54,6 +57,61 @@ class LidarTarget(LidarEnv):
 
     def state2feat(self, state: State) -> Array:
         return state
+
+    # def edge_blocks(self, state: LidarEnvState, lidar_data: Optional[Pos2d] = None) -> list[EdgeBlock]:
+    #     # agent - agent connection
+    #     agent_pos = state.agent[:, :2]
+    #     pos_diff = agent_pos[:, None, :] - agent_pos[None, :, :]  # [i, j]: i -> j
+    #     edge_feats = (jax_vmap(self.state2feat)(state.agent)[:, None, :] -
+    #                   jax_vmap(self.state2feat)(state.agent)[None, :, :])
+    #     dist = jnp.linalg.norm(pos_diff, axis=-1)
+    #     dist += jnp.eye(dist.shape[1]) * (self._params["comm_radius"] + 1)
+    #     agent_agent_mask = jnp.less(dist, self._params["comm_radius"])
+    #     id_agent = jnp.arange(self.num_agents)
+    #     agent_agent_edges = EdgeBlock(edge_feats, agent_agent_mask, id_agent, id_agent)
+
+    #     # agent - goal connection
+    #     # [改动] 原来是一一对应(agent_i只连goal_i)，改成全连接(每个agent看到所有goal)
+    #     # reward 仍然用一一对应 (GOAL_ASSIGNMENT="target")
+    #     id_goal = jnp.arange(self.num_agents, self.num_agents + self.num_goals)
+    #     agent_goal_mask = jnp.ones((self.num_agents, self.num_goals))
+    #     agent_goal_feats = (jax_vmap(self.state2feat)(state.agent)[:, None, :] -
+    #                         jax_vmap(self.state2feat)(state.goal)[None, :, :])
+    #     agent_goal_edges = EdgeBlock(
+    #         agent_goal_feats, agent_goal_mask, id_agent, id_goal
+    #     )
+    #     # --- 原来的一一对应代码 ---
+    #     # agent_goal_edges = []
+    #     # for i_agent in range(self.num_agents):
+    #     #     agent_state_i = state.agent[i_agent]
+    #     #     goal_state_i = state.goal[i_agent]
+    #     #     agent_goal_feats_i = self.state2feat(agent_state_i) - self.state2feat(goal_state_i)
+    #     #     agent_goal_edges.append(EdgeBlock(agent_goal_feats_i[None, None, :], jnp.ones((1, 1)),
+    #     #                                       jnp.array([i_agent]), jnp.array([i_agent + self.num_agents])))
+
+    #     # agent - obs connection
+    #     agent_obs_edges = []
+    #     n_hits = self._params["top_k_rays"] * self.num_agents
+    #     if lidar_data is not None:
+    #         id_obs = jnp.arange(self.num_agents + self.num_goals, self.num_agents + self.num_goals + n_hits)
+    #         for i in range(self.num_agents):
+    #             id_hits = jnp.arange(i * self._params["top_k_rays"], (i + 1) * self._params["top_k_rays"])
+    #             lidar_feats = agent_pos[i, :] - lidar_data[id_hits, :]
+    #             lidar_dist = jnp.linalg.norm(lidar_feats, axis=-1)
+    #             active_lidar = jnp.less(lidar_dist, self._params["comm_radius"] - 1e-1)
+    #             agent_obs_mask = jnp.ones((1, self._params["top_k_rays"]))
+    #             agent_obs_mask = jnp.logical_and(agent_obs_mask, active_lidar)
+    #             lidar_feats = jnp.concatenate(
+    #                 [lidar_feats, jnp.zeros((lidar_feats.shape[0], self.edge_dim - lidar_feats.shape[1]))], axis=-1)
+    #             agent_obs_edges.append(
+    #                 EdgeBlock(lidar_feats[None, :, :], agent_obs_mask, id_agent[i][None], id_obs[id_hits])
+    #             )
+
+    #     # [改动] agent_goal_edges 现在是单个 EdgeBlock，不是 list
+    #     return [agent_agent_edges, agent_goal_edges] + agent_obs_edges
+    #     # --- 原来: return [agent_agent_edges] + agent_goal_edges + agent_obs_edges
+
+
 
     def edge_blocks(self, state: LidarEnvState, lidar_data: Optional[Pos2d] = None) -> list[EdgeBlock]:
         # agent - agent connection

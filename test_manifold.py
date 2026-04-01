@@ -336,7 +336,7 @@ def test(args):
     for ii, (rollout, Ta_is_unsafe) in enumerate(zip(rollouts, is_unsafes)):
         safe_rate = rates[ii] * 100
         # 只生成不是 100% safe 的 episode 的视频
-        if safe_rate >= 100.0:
+        if safe_rate >= 2200.0:
             continue
         n_unsafe_videos += 1
         video_name = f"n{num_agents}_epi{ii:02}_reward{rewards[ii]:.7f}_cost{costs[ii]:.7f}_sr{safe_rate:.0f}"
@@ -350,7 +350,8 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required
-    parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
+    # parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
+    parser.add_argument("--path", type=str, default="logs/LidarTarget/informarl_subgoal/seed0_327223148_LPBT")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
@@ -377,7 +378,7 @@ def main():
     parser.add_argument("--max-delta", type=float, default=0.2)
 
     # default
-    parser.add_argument("-n", "--num-agents", type=int, default=5)
+    parser.add_argument("-n", "--num-agents", type=int, default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--env", type=str, default=None)
     parser.add_argument("--offset", type=int, default=0)

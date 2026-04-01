@@ -1,0 +1,52 @@
+wandb: Currently logged in as: hideinpoopoo (hideinpoopoo-king-s-college-london) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+> Running train.py Namespace(env='LidarTarget', num_agents=3, algo='informarl_subgoal', obs=3, seed=0, steps=400000, name=None, debug=False, cost_weight=0.0, n_rays=32, full_observation=False, clip_eps=0.25, lagr_init=0.5, lr_lagr=1e-07, cbf_weight=1.0, cbf_eps=0.01, cbf_std_alpha2=50.0, no_cbf_schedule=False, cost_schedule=False, no_rnn=True, use_paper_cbf=True, cbf_alpha1=40.0, cbf_alpha2=30.0, use_cbf_closed_form=True, cbf_std_alpha1=10.0, relative_subgoal=True, max_delta=0.2, actor_gnn_layers=2, Vl_gnn_layers=2, Vh_gnn_layers=1, lr_actor=0.0003, lr_Vl=0.001, lr_Vh=0.001, rnn_layers=1, use_lstm=False, coef_ent=0.01, rnn_step=1, n_env_train=2048, batch_size=32768, n_env_test=32, log_dir='./logs', eval_interval=100, eval_epi=1, save_interval=1000, subgoal_interval=8, max_step=128)
+Traceback (most recent call last):
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 275, in <module>
+    main()
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 271, in main
+    train(args)
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 122, in train
+    trainer = Trainer(
+  File "/home/a5l/zihao1996.a5l/project/subgoal/dgppo/trainer/trainer_subgoal.py", line 55, in __init__
+    wandb.init(name=params['run_name'], project='dgppo', group=env.__class__.__name__, dir=self.log_dir)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1577, in init
+    run = wi.init(run_settings, run_config, run_printer)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1005, in init
+    result = wait_with_progress(
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/concurrent/futures/_base.py", line 453, in result
+    self._condition.wait(timeout)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/threading.py", line 320, in wait
+    waiter.acquire()
+KeyboardInterrupt
+Traceback (most recent call last):
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 275, in <module>
+    main()
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 271, in main
+    train(args)
+  File "/home/a5l/zihao1996.a5l/project/subgoal/train_try_1.py", line 122, in train
+    trainer = Trainer(
+  File "/home/a5l/zihao1996.a5l/project/subgoal/dgppo/trainer/trainer_subgoal.py", line 55, in __init__
+    wandb.init(name=params['run_name'], project='dgppo', group=env.__class__.__name__, dir=self.log_dir)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1577, in init
+    run = wi.init(run_settings, run_config, run_printer)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/wandb_init.py", line 1005, in init
+    result = wait_with_progress(
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/concurrent/futures/_base.py", line 453, in result
+    self._condition.wait(timeout)
+  File "/home/a5l/zihao1996.a5l/ENTER/envs/dgppo/lib/python3.10/threading.py", line 320, in wait
+    waiter.acquire()
+KeyboardInterrupt
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33minformarl_subgoal_seed000_325203947_ZKAS[0m at: [34m[0m
