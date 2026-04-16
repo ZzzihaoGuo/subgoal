@@ -299,6 +299,7 @@ def manifold_single_agent_(
     a_state: Array,
     u_ref: Array,
     s_prev: Array,
+    G: Array,
     r: float,
     k: int,
     K: float = 0.2,
@@ -397,7 +398,8 @@ def manifold_single_agent_(
     active_f = jnp.maximum(pos_active, viab_active)  # (k,) smooth [0,1]
 
     # ===== 6. 增广 Jacobian =====
-    Jc_u = K * k_J_g * acc_scale * active_f[:, None]  # (k, 2)
+    # G: (2, 2) maps action to position acceleration: q̈ = G @ u
+    Jc_u = K * (k_J_g @ G) * active_f[:, None]  # (k, 2)
     Jc_slack = jnp.diag(k_s) * active_f[:, None] + jnp.eye(k) * (1.0 - active_f[:, None])
     Jc = jnp.concatenate([Jc_u, Jc_slack], axis=1)  # (k, 2+k)
 
@@ -522,14 +524,24 @@ def manifold_all_agents(
     acc_scale: float = 10.0,
     w_slack: float = 5.0,
     state_to_pos_vel=None,
+    get_pos_acc_jacobian=None,
 ):
     """对所有 agent 并行计算 manifold 修正"""
-    a_states = graph.type_states(type_idx=0, n_type=n_agent)
+    a_states_raw = graph.type_states(type_idx=0, n_type=n_agent)
     obs_states = graph.type_states(type_idx=2, n_type=n_agent * n_rays)
+
+    # compute G matrix per agent (before state conversion)
+    if get_pos_acc_jacobian is not None:
+        a_G = get_pos_acc_jacobian(a_states_raw)  # (n_agent, 2, 2)
+    else:
+        a_G = jnp.broadcast_to(acc_scale * jnp.eye(2), (n_agent, 2, 2))
+
     # convert to [x, y, vx, vy] for manifold computation
     if state_to_pos_vel is not None:
-        a_states = jax.vmap(state_to_pos_vel)(a_states)
+        a_states = jax.vmap(state_to_pos_vel)(a_states_raw)
         obs_states = jax.vmap(state_to_pos_vel)(obs_states)
+    else:
+        a_states = a_states_raw
     a_obs_states = ei.rearrange(obs_states, "(n_agent n_ray) d -> n_agent n_ray d", n_agent=n_agent)
 
     agent_idx = jnp.arange(n_agent)
@@ -538,9 +550,9 @@ def manifold_all_agents(
                    alpha_max=alpha_max, g_act_thresh=g_act_thresh, dt=dt,
                    safety_margin=safety_margin, n_lookahead=n_lookahead,
                    acc_scale=acc_scale, w_slack=w_slack),
-        in_axes=(0, 0, 0, None, 0, 0)
+        in_axes=(0, 0, 0, None, 0, 0, 0)
     )
-    u_opt, relax, s_new, debug_info = fn(a_states, agent_idx, a_obs_states, a_states, u_ref, s_all)
+    u_opt, relax, s_new, debug_info = fn(a_states, agent_idx, a_obs_states, a_states, u_ref, s_all, a_G)
     return u_opt, relax, s_new, debug_info
 
 
@@ -607,7 +619,7 @@ def manifold_init_slack(
 def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float = 8.0,
                     s_min: float = 0.1, alpha_max: float = 5.0, g_act_thresh: float = 0.1,
                     safety_margin: float = 0.02, n_lookahead: int = 2, w_slack: float = 5.0,
-                    state_to_pos_vel=None):
+                    state_to_pos_vel=None, get_pos_acc_jacobian=None):
     """工厂函数：创建 manifold 修正函数"""
     n_agent = env.num_agents
     n_rays = env.params["top_k_rays"]
@@ -640,6 +652,7 @@ def get_manifold_fn(env: MultiAgentEnv, k: int = 3, K: float = 0.15, Kc: float =
         acc_scale=acc_scale,
         w_slack=w_slack,
         state_to_pos_vel=state_to_pos_vel,
+        get_pos_acc_jacobian=get_pos_acc_jacobian,
     )
 
     init_slack_fn = ft.partial(

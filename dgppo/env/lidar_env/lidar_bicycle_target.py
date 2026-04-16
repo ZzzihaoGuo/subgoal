@@ -133,6 +133,23 @@ class LidarBicycleTarget(LidarTarget):
         vy = state[..., 4] * state[..., 3]
         return jnp.concatenate([pos, vx[..., None], vy[..., None]], axis=-1)
 
+    def get_pos_acc_jacobian(self, state: Array) -> Array:
+        """Return G matrix for bicycle: q̈ = G(x) @ [ω, acc].
+
+        G(x) = 10 * [[-v²·sin(θ),  cos(θ)],
+                      [ v²·cos(θ),  sin(θ)]]
+        """
+        cos_theta = state[:, 2]
+        sin_theta = state[:, 3]
+        v = state[:, 4]
+        v_sq = v ** 2
+        # (n, 2, 2): G[i] = 10 * [[-v²·sinθ, cosθ], [v²·cosθ, sinθ]]
+        G = 10.0 * jnp.stack([
+            jnp.stack([-v_sq * sin_theta, cos_theta], axis=-1),
+            jnp.stack([ v_sq * cos_theta, sin_theta], axis=-1),
+        ], axis=-2)
+        return G
+
     def state2feat(self, state: State) -> Array:
         vx = state[4] * state[2]
         vy = state[4] * state[3]

@@ -351,7 +351,7 @@ def main():
 
     # required
     # parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
-    parser.add_argument("--path", type=str, default="logs/LidarTarget/informarl_subgoal/seed0_327223148_LPBT")
+    parser.add_argument("--path", type=str, default="logs/LidarLine/informarl_subgoal/seed0_401121009_RTUN")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")

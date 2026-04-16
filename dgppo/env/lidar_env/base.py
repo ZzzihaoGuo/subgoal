@@ -100,6 +100,14 @@ class LidarEnv(MultiAgentEnv, ABC):
         Override in subclasses with different state representations."""
         return state  # default: state is already [x, y, vx, vy]
 
+    def get_pos_acc_jacobian(self, state: Array) -> Array:
+        """Return G matrix: q̈ = G(x) @ u, shape (n_agents, 2, action_dim).
+        Override in subclasses with different dynamics."""
+        # double integrator: q̈ = u / m, so G = (1/m) * I
+        acc_scale = 1.0 / self._params["m"]
+        n = state.shape[0]
+        return jnp.broadcast_to(acc_scale * jnp.eye(2), (n, 2, 2))
+
     @property
     def state_dim(self) -> int:
         return 4  # x, y, vx, vy
@@ -812,7 +820,8 @@ class LidarEnv(MultiAgentEnv, ABC):
                 self, k=k, K=K, Kc=Kc, s_min=s_min,
                 alpha_max=alpha_max, g_act_thresh=g_act_thresh,
                 safety_margin=safety_margin, n_lookahead=n_lookahead, w_slack=w_slack,
-                state_to_pos_vel=self.state_to_pos_vel)
+                state_to_pos_vel=self.state_to_pos_vel,
+                get_pos_acc_jacobian=self.get_pos_acc_jacobian)
         return self
 
     def manifold_init_slack(self, graph: GraphsTuple):

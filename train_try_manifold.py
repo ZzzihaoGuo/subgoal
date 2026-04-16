@@ -197,7 +197,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, default="LidarLine") #LidarLine; LidarTarget; LidarSpread
+    parser.add_argument("--env", type=str, default="LidarBicycleTarget") #LidarLine; LidarTarget; LidarSpread; LidarBicycleTarget
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--algo", type=str, default="informarl_subgoal")
     parser.add_argument("--obs", type=int, default=3)
@@ -240,7 +240,7 @@ def main():
     # Subgoal mode arguments
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
     parser.add_argument("--max-delta", type=float, default=0.2)
-    parser.add_argument("--subgoal-shadow-coef", type=float, default=1.0)  ## need to search
+    parser.add_argument("--subgoal-shadow-coef", type=float, default=0.1)  ## need to search
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
@@ -261,7 +261,7 @@ def main():
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-epi", type=int, default=1)
-    parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument("--save-interval", type=int, default=10000)
 
     parser.add_argument("--subgoal-interval", type=int, default=8)
     parser.add_argument("--max-step", type=int, default=128)

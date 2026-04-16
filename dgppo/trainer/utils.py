@@ -20,10 +20,10 @@ else:
 
 
 # ============ Sparse Reward 系数配置（train 和 test 共用）============
-GOAL_REWARD_COEF = 0.1          # goal_reward 系数
+GOAL_REWARD_COEF = 0.01          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
-SUBGOAL_BONUS_COEF = 0.0001       # subgoal_bonus 系数
+SUBGOAL_BONUS_COEF = 0.0000       # subgoal_bonus 系数
 DIST_TO_GOAL_COEF = 0.1        # dist_agent_to_goal 系数
 
 SUBGOAL_SHADOW_COEF = 0.01     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1  # 可通过 --subgoal-shadow-coef 覆盖
