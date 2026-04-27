@@ -544,10 +544,10 @@ def render_lidar(
     subgoal_history_lines = []  # list of lists: [agent_idx][line_idx] = line between subgoals
     subgoal_history = []  # list of lists: [agent_idx] = list of (timestep, pos) tuples
 
-    if show_subgoal and dim == 2:
-        # rollout.actions contains subgoals: (T, n_agent, 2)
-        subgoal_pos_0 = np.array(rollout.actions[0, :, :2])  # (n_agent, 2)
-        agent_pos_0 = np.array(graph0.states[:n_agent, :2])
+    if show_subgoal and (dim == 2 or dim == 3):
+        # rollout.actions contains subgoals: (T, n_agent, dim)
+        subgoal_pos_0 = np.array(rollout.actions[0, :, :dim])  # (n_agent, dim)
+        agent_pos_0 = np.array(graph0.states[:n_agent, :dim])
 
         # Pre-collect all subgoal positions at each interval for history
         total_steps = len(rollout.actions)
@@ -559,37 +559,57 @@ def render_lidar(
         # Collect subgoals at each interval boundary
         for t in range(0, total_steps, subgoal_interval):
             for ii in range(n_agent):
-                pos = np.array(rollout.actions[t, ii, :2])
+                pos = np.array(rollout.actions[t, ii, :dim])
                 subgoal_history[ii].append((t, pos))
 
         # Create markers for historical subgoals (initially hidden)
         max_history_per_agent = len(subgoal_history[0]) if subgoal_history else 0
         for ii in range(n_agent):
             for hist_idx in range(max_history_per_agent):
-                # Create marker but initially invisible
-                marker, = ax.plot([], [],
-                                marker='*', markersize=12, color=subgoal_color,
-                                markeredgecolor='black', markeredgewidth=0.5,
-                                alpha=0, zorder=5)  # alpha=0 means invisible
+                if dim == 3:
+                    marker, = ax.plot([], [], [],
+                                    marker='*', markersize=12, color=subgoal_color,
+                                    markeredgecolor='black', markeredgewidth=0.5,
+                                    alpha=0, zorder=5)
+                else:
+                    marker, = ax.plot([], [],
+                                    marker='*', markersize=12, color=subgoal_color,
+                                    markeredgecolor='black', markeredgewidth=0.5,
+                                    alpha=0, zorder=5)
                 subgoal_history_markers[ii].append(marker)
 
             # Create lines between consecutive subgoals (one less than markers)
             for line_idx in range(max(0, max_history_per_agent - 1)):
-                line, = ax.plot([], [], '-', color=subgoal_color, linewidth=1.5,
-                               alpha=0, zorder=4)  # initially invisible
+                if dim == 3:
+                    line, = ax.plot([], [], [], '-', color=subgoal_color, linewidth=1.5,
+                                   alpha=0, zorder=4)
+                else:
+                    line, = ax.plot([], [], '-', color=subgoal_color, linewidth=1.5,
+                                   alpha=0, zorder=4)
                 subgoal_history_lines[ii].append(line)
 
         for ii in range(n_agent):
             # current subgoal marker (star) - brighter and larger
-            marker, = ax.plot(subgoal_pos_0[ii, 0], subgoal_pos_0[ii, 1],
-                            marker='*', markersize=15, color=subgoal_color,
-                            markeredgecolor='black', markeredgewidth=1, zorder=8)
+            if dim == 3:
+                marker, = ax.plot([subgoal_pos_0[ii, 0]], [subgoal_pos_0[ii, 1]], [subgoal_pos_0[ii, 2]],
+                                marker='*', markersize=15, color=subgoal_color,
+                                markeredgecolor='black', markeredgewidth=1, zorder=8)
+            else:
+                marker, = ax.plot(subgoal_pos_0[ii, 0], subgoal_pos_0[ii, 1],
+                                marker='*', markersize=15, color=subgoal_color,
+                                markeredgecolor='black', markeredgewidth=1, zorder=8)
             subgoal_markers.append(marker)
 
             # line from agent to subgoal
-            line, = ax.plot([agent_pos_0[ii, 0], subgoal_pos_0[ii, 0]],
-                           [agent_pos_0[ii, 1], subgoal_pos_0[ii, 1]],
-                           '--', color=subgoal_color, linewidth=1.5, alpha=0.7, zorder=4)
+            if dim == 3:
+                line, = ax.plot([agent_pos_0[ii, 0], subgoal_pos_0[ii, 0]],
+                               [agent_pos_0[ii, 1], subgoal_pos_0[ii, 1]],
+                               [agent_pos_0[ii, 2], subgoal_pos_0[ii, 2]],
+                               '--', color=subgoal_color, linewidth=1.5, alpha=0.7, zorder=4)
+            else:
+                line, = ax.plot([agent_pos_0[ii, 0], subgoal_pos_0[ii, 0]],
+                               [agent_pos_0[ii, 1], subgoal_pos_0[ii, 1]],
+                               '--', color=subgoal_color, linewidth=1.5, alpha=0.7, zorder=4)
             subgoal_lines.append(line)
 
     # plot edges
@@ -720,9 +740,9 @@ def render_lidar(
             agent_col.set_3d_properties(n_pos_t[:n_agent + n_goal, 2], zdir='z')
 
         # update subgoals
-        if show_subgoal and dim == 2:
-            subgoal_pos_t = np.array(rollout.actions[kk, :, :2])
-            agent_pos_t = np.array(graph.states[:n_agent, :2])
+        if show_subgoal and (dim == 2 or dim == 3):
+            subgoal_pos_t = np.array(rollout.actions[kk, :, :dim])
+            agent_pos_t = np.array(graph.states[:n_agent, :dim])
 
             # Update historical subgoal markers with fading effect
             for ii in range(n_agent):
@@ -743,7 +763,10 @@ def render_lidar(
                         if hist_t == current_interval_start:
                             alpha = 0  # Hide, current subgoal will be shown separately
 
-                        subgoal_history_markers[ii][hist_idx].set_data([hist_pos[0]], [hist_pos[1]])
+                        if dim == 3:
+                            subgoal_history_markers[ii][hist_idx].set_data_3d([hist_pos[0]], [hist_pos[1]], [hist_pos[2]])
+                        else:
+                            subgoal_history_markers[ii][hist_idx].set_data([hist_pos[0]], [hist_pos[1]])
                         subgoal_history_markers[ii][hist_idx].set_alpha(alpha)
                     else:
                         # Future subgoals should be invisible
@@ -766,8 +789,12 @@ def render_lidar(
                             else:
                                 line_alpha = 0.7
 
-                            subgoal_history_lines[ii][line_idx].set_data(
-                                [pos1[0], pos2[0]], [pos1[1], pos2[1]])
+                            if dim == 3:
+                                subgoal_history_lines[ii][line_idx].set_data_3d(
+                                    [pos1[0], pos2[0]], [pos1[1], pos2[1]], [pos1[2], pos2[2]])
+                            else:
+                                subgoal_history_lines[ii][line_idx].set_data(
+                                    [pos1[0], pos2[0]], [pos1[1], pos2[1]])
                             subgoal_history_lines[ii][line_idx].set_alpha(line_alpha)
                         else:
                             # Future lines should be invisible
@@ -775,10 +802,15 @@ def render_lidar(
 
             for ii in range(n_agent):
                 # update current subgoal marker position (full opacity)
-                subgoal_markers[ii].set_data([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]])
-                # update line from agent to subgoal
-                subgoal_lines[ii].set_data([agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
-                                           [agent_pos_t[ii, 1], subgoal_pos_t[ii, 1]])
+                if dim == 3:
+                    subgoal_markers[ii].set_data_3d([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]], [subgoal_pos_t[ii, 2]])
+                    subgoal_lines[ii].set_data_3d([agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
+                                                  [agent_pos_t[ii, 1], subgoal_pos_t[ii, 1]],
+                                                  [agent_pos_t[ii, 2], subgoal_pos_t[ii, 2]])
+                else:
+                    subgoal_markers[ii].set_data([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]])
+                    subgoal_lines[ii].set_data([agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
+                                               [agent_pos_t[ii, 1], subgoal_pos_t[ii, 1]])
 
         # update edges
         e_edge_index_t = np.stack([graph.senders, graph.receivers], axis=0)

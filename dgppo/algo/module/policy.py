@@ -327,8 +327,8 @@ class SubgoalPolicy(MultiAgentPolicy):
         return action_tanh
 
     def _get_current_pos(self, obs: GraphsTuple) -> Array:
-        """从 obs 中提取当前 agent 位置"""
-        return obs.type_states(type_idx=0, n_type=self.n_agents)[:, :2]  # (n_agents, 2)
+        """从 obs 中提取当前 agent 位置 (支持 2D/3D)"""
+        return obs.type_states(type_idx=0, n_type=self.n_agents)[:, :self.subgoal_dim]  # (n_agents, subgoal_dim)
 
     def get_action(self, params: Params, obs: GraphsTuple, rnn_state: Array) -> [Action, Array]:
         """返回 subgoal: (n_agents, 2) - [x, y] 坐标"""

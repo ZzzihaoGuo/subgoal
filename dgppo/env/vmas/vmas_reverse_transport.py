@@ -18,6 +18,7 @@ from dgppo.utils.typing import Action, Array, Cost, Done, Info, Reward, State
 from dgppo.utils.utils import save_anim, tree_index
 from dgppo.env.base import MultiAgentEnv
 from dgppo.env.utils import get_node_goal_rng
+from dgppo.algo.utils import get_manifold_fn_vmas
 
 
 class VMASReverseTransportState(NamedTuple):
@@ -61,6 +62,10 @@ class VMASReverseTransport(MultiAgentEnv):
         self.n_obs = 3
 
         self.frame_skip = 4
+
+        # manifold (ATACOM) 相关
+        self._manifold = None
+        self._manifold_init_slack = None
 
     @property
     def state_dim(self) -> int:
@@ -213,10 +218,10 @@ class VMASReverseTransport(MultiAgentEnv):
 
         # goal distance penalty
         dist2goal = jnp.linalg.norm(goal_pos - box_pos, axis=-1)
-        reward = -dist2goal.mean() * 0.01
+        reward = -dist2goal.mean() * 0.01 * 100
 
         # not reaching goal penalty
-        reward -= jnp.where(dist2goal > self._params["dist2goal"], 1.0, 0.0).mean() * 0.001
+        reward -= jnp.where(dist2goal > self._params["dist2goal"], 1.0, 0.0).mean() * 0.001 * 100
 
         return reward
 
@@ -290,8 +295,8 @@ class VMASReverseTransport(MultiAgentEnv):
         node_type = jnp.full(self.num_agents, VMASReverseTransport.AGENT)
         edge_blocks = self.edge_blocks(env_state)
 
-        # create graph
-        n_state_vec = jnp.zeros((self.num_agents, 0))
+        # create graph — states 存 [x, y, vx, vy] 供 SubgoalPolicy 使用
+        n_state_vec = jnp.concatenate([state.a_pos, state.a_vel], axis=-1)  # (n_agents, 4)
         return GetGraph(node_feats, node_type, edge_blocks, env_state, n_state_vec).to_padded()
 
     def edge_blocks(self, env_state: VMASReverseTransportState) -> list[EdgeBlock]:
@@ -309,6 +314,91 @@ class VMASReverseTransport(MultiAgentEnv):
         agent_agent_edges = EdgeBlock(state_diff, agent_agent_mask, id_agent, id_agent)
 
         return [agent_agent_edges]
+
+    # ======== Subgoal interface ========
+    GOAL_ASSIGNMENT = "spread"  # 所有 agent 共享同一个 goal (box target)
+
+    def get_agent_goals(self, graph: GraphsTuple) -> Array:
+        """返回每个 agent 的目标位置 (n_agents, 2)
+        对于 ReverseTransport, 目标是 box 的 goal_pos, broadcast 到所有 agent
+        """
+        env_state: VMASReverseTransportState = graph.env_states
+        # (2,) -> (n_agents, 2)
+        return jnp.broadcast_to(env_state.goal_pos, (self.num_agents, 2))
+
+    def u_ref(self, graph: GraphsTuple, target_pos=None, is_final_goal=False) -> Action:
+        """PD 控制器: 驱动 agent 到 target_pos
+        action = K_p * (target - pos) + K_d * (desired_vel - vel)
+        """
+        env_state: VMASReverseTransportState = graph.env_states
+        agent_pos = env_state.a_pos  # (n_agents, 2)
+        agent_vel = env_state.a_vel  # (n_agents, 2)
+
+        if target_pos is None:
+            target_pos = self.get_agent_goals(graph)
+
+        # PD 增益
+        K_p = 2.0
+        K_d = 1.0
+
+        error_pos = target_pos - agent_pos
+        dist = jnp.linalg.norm(error_pos, axis=-1, keepdims=True)
+        direction = jnp.where(dist > 1e-6, error_pos / dist, 0.0)
+
+        # 期望速度: 远处全速, 接近时减速
+        max_speed = 0.5
+        desired_speed = jnp.where(
+            is_final_goal,
+            jnp.clip(dist * 2.0, 0.0, max_speed),  # 最终目标: 接近时减速
+            jnp.where(dist > 0.05, max_speed, max_speed * 0.5)  # 中间subgoal: 保持速度
+        )
+        desired_vel = direction * desired_speed
+
+        action = K_p * error_pos + K_d * (desired_vel - agent_vel)
+        return self.clip_action(action)
+
+    # ======== Manifold (ATACOM) interface ========
+    def _get_agent_state(self, graph: GraphsTuple) -> Array:
+        """从 graph.env_states 提取 agent states: (n_agents, 4) [x, y, vx, vy]"""
+        env_state: VMASReverseTransportState = graph.env_states
+        return jnp.concatenate([env_state.a_pos, env_state.a_vel], axis=-1)  # (n_agents, 4)
+
+    def _get_obs_state(self, graph: GraphsTuple) -> Array:
+        """从 graph.env_states 提取 obstacle states: (n_obs, 4) [x, y, 0, 0]"""
+        env_state: VMASReverseTransportState = graph.env_states
+        o_pos = env_state.o_pos  # (n_obs, 2)
+        o_vel = jnp.zeros_like(o_pos)  # static obstacles
+        return jnp.concatenate([o_pos, o_vel], axis=-1)  # (n_obs, 4)
+
+    def init_manifold(self, k: int = None, K: float = 0.5, Kc: float = 100.0,
+                      s_min: float = 0.1, alpha_max: float = 50.0, g_act_thresh: float = 0.1,
+                      safety_margin: float = 0.02, n_lookahead: int = 2, w_slack: float = 5.0):
+        """初始化 VMAS manifold (agent-agent + agent-obstacle)"""
+        if k is None:
+            k = (self.num_agents - 1) + self.n_obs
+        if self._manifold is None:
+            self._manifold, self._manifold_init_slack = get_manifold_fn_vmas(
+                self, k=k, K=K, Kc=Kc, s_min=s_min,
+                alpha_max=alpha_max, g_act_thresh=g_act_thresh,
+                safety_margin=safety_margin, n_lookahead=n_lookahead, w_slack=w_slack,
+                get_obs_state=self._get_obs_state,
+                get_agent_state=self._get_agent_state,
+            )
+        return self
+
+    def manifold_init_slack(self, graph: GraphsTuple):
+        """初始化松弛变量"""
+        if self._manifold_init_slack is None:
+            raise RuntimeError("Must call init_manifold() before using manifold_init_slack")
+        return self._manifold_init_slack(graph)
+
+    def get_manifold_action(self, graph: GraphsTuple, u_ref: Action,
+                            s_all=None) -> tuple:
+        """Manifold 安全动作修正"""
+        if self._manifold is None:
+            raise RuntimeError("Must call init_manifold() before using get_manifold_action")
+        u_opt, relax, s_new, debug_info = self._manifold(graph, u_ref, s_all)
+        return u_opt, relax, s_new, debug_info
 
     def state_lim(self, state: Optional[State] = None) -> Tuple[State, State]:
         pass

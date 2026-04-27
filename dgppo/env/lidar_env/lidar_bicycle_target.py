@@ -342,7 +342,7 @@ class LidarBicycleTarget(LidarTarget):
         pos_diff = agent_states[:, :2] - goal_pos
 
         # PID parameters
-        k_omega = 1.0
+        k_omega = 3.0
         k_v = 7.0
         k_a = 3.0
 
@@ -371,7 +371,7 @@ class LidarBicycleTarget(LidarTarget):
         # final goal: slow down near target to stop precisely
         # subgoal: maintain cruise speed, only reduce slightly when very close
         approach_radius = 0.15
-        speed_scale = jnp.clip(dist / approach_radius, 0.15, 1.0)
+        speed_scale = jnp.clip(dist / approach_radius, 0.02, 1.0)
         final_speed = max_speed * speed_scale  # decelerates to ~0 at goal
         subgoal_speed = jnp.where(dist > 0.05, max_speed, cruise_speed)  # cruise through
 

@@ -2,7 +2,7 @@ from typing import Optional
 
 from .base import MultiAgentEnv
 from dgppo.env.mpe import MPETarget, MPESpread, MPELine, MPEFormation, MPECorridor, MPEConnectSpread
-from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarBicycleTarget
+from dgppo.env.lidar_env import LidarSpread, LidarTarget, LidarLine, LidarBicycleTarget, LinearDrone, CrazyFlie
 from dgppo.env.vmas import VMASWheel, VMASReverseTransport
 
 
@@ -20,13 +20,15 @@ ENV = {
     'LidarBicycleTarget': LidarBicycleTarget,
     'VMASReverseTransport': VMASReverseTransport,
     'VMASWheel': VMASWheel,
+    'LinearDrone': LinearDrone,
+    'CrazyFlie': CrazyFlie,
 }
 
 
 DEFAULT_MAX_STEP = 128
 
 
-LIDAR_ENVS = {'LidarSpread', 'LidarTarget', 'LidarLine', 'LidarBicycleTarget'}
+LIDAR_ENVS = {'LidarSpread', 'LidarTarget', 'LidarLine', 'LidarBicycleTarget', 'LinearDrone', 'CrazyFlie'}
 
 
 def make_env(

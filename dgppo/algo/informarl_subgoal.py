@@ -244,7 +244,11 @@ class InforMARL_SUB(Algorithm):
         #         int(train_steps * 0.6): 1/3,    # 60% 时 × 0.33 → 0.01
         #     }
         # )
-        self.reach_thresh_schedule_fn = optax.constant_schedule(0.01) 
+        # 从 env 读取 dist2goal 作为 reach 阈值，每个 env 用自己的定义
+        # （LidarTarget=0.01, LinearDrone=0.02, CrazyFlie=0.05 ...）
+        self.reach_thresh_schedule_fn = optax.constant_schedule(
+            float(env.params.get("dist2goal", 0.01))
+        )
 
     @property
     def config(self) -> dict:

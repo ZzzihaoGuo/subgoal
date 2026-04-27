@@ -44,7 +44,7 @@ def manifold_rollout(
     init_graph = env.reset(key_x0)
 
     # 初始化 subgoal 和松弛变量
-    init_subgoal = init_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    init_subgoal = env.get_agent_goals(init_graph)
     init_s_all = env.manifold_init_slack(init_graph)
 
     def body_(data, inp_data):
@@ -53,7 +53,7 @@ def manifold_rollout(
 
         # === 高层决策 ===
         should_update = (step_count % subgoal_interval == 0)
-        real_goal = graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+        real_goal = env.get_agent_goals(graph)
 
         def update_subgoal(_):
             if stochastic:
@@ -84,8 +84,8 @@ def manifold_rollout(
         # === 稀疏奖励计算 ===
         agent_states = next_graph.type_states(type_idx=0, n_type=env.num_agents)
         goals = real_goal
-        agent_pos = agent_states[:, :2]
-        goal_pos = goals[:, :2]
+        agent_pos = agent_states[:, :env.action_dim]
+        goal_pos = goals[:, :env.action_dim]
         dist2goal = jnp.linalg.norm(
             jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
         ).min(axis=1)
@@ -144,13 +144,15 @@ def test(args):
 
     # create environment
     num_agents = config.num_agents if args.num_agents is None else args.num_agents
+    max_step = args.max_step if args.max_step is not None else getattr(config, "max_step", None)
     env = make_env(
         env_id=config.env if args.env is None else args.env,
         num_agents=num_agents,
         num_obs=config.obs if args.obs is None else args.obs,
-        max_step=args.max_step,
+        max_step=max_step,
         full_observation=args.full_observation,
     )
+    print(f"max_step: {max_step} (config={getattr(config, 'max_step', None)}, cli={args.max_step})")
 
     # create algorithm
     path = args.path
@@ -207,7 +209,7 @@ def test(args):
     warmup_key = jr.PRNGKey(9999)
     warmup_graph = env.reset(warmup_key)
     warmup_s = env.manifold_init_slack(warmup_graph)
-    target_pos = warmup_graph.type_states(type_idx=1, n_type=env.num_agents)[:, :2]
+    target_pos = env.get_agent_goals(warmup_graph)
     nominal = env.u_ref(warmup_graph, target_pos=target_pos, is_final_goal=False)
 
     start = time.time()
@@ -223,6 +225,7 @@ def test(args):
     rollout_fn = ft.partial(
         manifold_rollout, env, act_fn, init_rnn_state,
         stochastic=args.stochastic, subgoal_interval=args.subgoal_interval,
+        reach_thresh=float(env.params.get("dist2goal", 0.01)),
     )
     rollout_fn = jax_jit_np(rollout_fn)
 
@@ -257,8 +260,8 @@ def test(args):
             final_dist = rollout.dist2goal[-1]
         else:
             final_states = rollout.graph.states[-1]
-            agent_pos = final_states[:env.num_agents, :2]
-            goal_pos = final_states[env.num_agents:env.num_agents * 2, :2]
+            agent_pos = final_states[:env.num_agents, :env.action_dim]
+            goal_pos = final_states[env.num_agents:env.num_agents * 2, :env.action_dim]
             final_dist = jnp.linalg.norm(
                 jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
             ).min(axis=1)
@@ -351,7 +354,7 @@ def main():
 
     # required
     # parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
-    parser.add_argument("--path", type=str, default="logs/LidarLine/informarl_subgoal/seed0_401121009_RTUN")
+    parser.add_argument("--path", type=str, default="logs/CrazyFlie/informarl_subgoal/seed0_422102500_KIEW")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
@@ -365,7 +368,7 @@ def main():
 
     # test parameters
     parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=1000)
+    parser.add_argument("--epi", type=int, default=5)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -375,7 +378,7 @@ def main():
     parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--subgoal-interval", type=int, default=8)
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
-    parser.add_argument("--max-delta", type=float, default=0.2)
+    parser.add_argument("--max-delta", type=float, default=0.4)
 
     # default
     parser.add_argument("-n", "--num-agents", type=int, default=None)

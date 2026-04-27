@@ -12,7 +12,7 @@ conda activate dgppo
 cd /home/a5l/zihao1996.a5l/project/subgoal
 
 python train_try_manifold.py \
-    --env LidarBicycleTarget \
+    --env CrazyFlie \
     --algo informarl_subgoal \
     -n 3 \
-    --obs 3
+    --obs 6
