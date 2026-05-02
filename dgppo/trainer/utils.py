@@ -20,14 +20,26 @@ else:
 
 
 # ============ Sparse Reward 系数配置（train 和 test 共用）============
-GOAL_REWARD_COEF = 0.1          # goal_reward 系数
+# 默认值；每个 env 类可定义同名 class attribute 覆盖（例如 LidarTarget.GOAL_REWARD_COEF = 0.2）。
+# GOAL_REWARD_COEF / SUBGOAL_BONUS_COEF / SUBGOAL_SHADOW_COEF / DIST_TO_GOAL_COEF 支持 per-env override。
+GOAL_REWARD_COEF = 0.0          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
-SUBGOAL_BONUS_COEF = 0.0000       # subgoal_bonus 系数
+SUBGOAL_BONUS_COEF = 0.001       # subgoal_bonus 系数
 DIST_TO_GOAL_COEF = 0.1        # dist_agent_to_goal 系数
 
-SUBGOAL_SHADOW_COEF = 0.00     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1  # 可通过 --subgoal-shadow-coef 覆盖
+SUBGOAL_SHADOW_COEF = 1.00     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1  # 可通过 --subgoal-shadow-coef 覆盖
 # ===================================================================
+
+
+def _resolve_coefs(env):
+    """读取 sparse reward 系数；env 类可通过同名 class attribute 覆盖默认值。"""
+    return (
+        getattr(env, 'GOAL_REWARD_COEF', GOAL_REWARD_COEF),
+        getattr(env, 'SUBGOAL_BONUS_COEF', SUBGOAL_BONUS_COEF),
+        getattr(env, 'SUBGOAL_SHADOW_COEF', SUBGOAL_SHADOW_COEF),
+        getattr(env, 'DIST_TO_GOAL_COEF', DIST_TO_GOAL_COEF),
+    )
 
 
 def _compute_dist2goal(env, goal_pos, agent_pos):
@@ -82,7 +94,9 @@ def rollout_hierarchical(
     
     # 初始化：第一个subgoal就是最终目标
     init_subgoal = env.get_agent_goals(init_graph)  # (n_agents, 2)
-    
+
+    goal_reward_coef, subgoal_bonus_coef, subgoal_shadow_coef, dist_to_goal_coef = _resolve_coefs(env)
+
     def body_(data, inp):
         graph, rnn_state, current_subgoal, step_count = data
         key_ = inp
@@ -141,20 +155,20 @@ def rollout_hierarchical(
         # 1. 到达最终目标的奖励 (使用动态阈值)
         goal_pos = real_goal[:, :env.action_dim]
         dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
-        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
-        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * goal_reward_coef
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * goal_reward_coef
 
         # 2. 到达 subgoal 的奖励 (鼓励生成可达的 subgoal)
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
-        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * subgoal_bonus_coef
 
         # 3. agent 距离 goal 的 dense reward
-        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        dist_agent_to_goal = -dist2goal.mean() * dist_to_goal_coef
 
         # 4. subgoal 阴影区惩罚（subgoal在障碍物后方）
         # 使用当前graph（生成subgoal时的状态）来判断
         shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)  # (n_agents,), -1或0
-        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF  # 负值惩罚
+        subgoal_shadow_penalty = shadow_cost.mean() * subgoal_shadow_coef  # 负值惩罚
 
         sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
         
@@ -227,6 +241,8 @@ def rollout_hierarchical_manifold(
     init_subgoal = env.get_agent_goals(init_graph)
     init_s_all = env.manifold_init_slack(init_graph)
 
+    goal_reward_coef, subgoal_bonus_coef, subgoal_shadow_coef, dist_to_goal_coef = _resolve_coefs(env)
+
     def body_(data, inp):
         graph, rnn_state, current_subgoal, step_count, s_all = data
         key_ = inp
@@ -263,14 +279,14 @@ def rollout_hierarchical_manifold(
         goal_pos = real_goal[:, :env.action_dim]
         dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
-        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
-        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * goal_reward_coef
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * goal_reward_coef
 
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
-        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
-        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * subgoal_bonus_coef
+        dist_agent_to_goal = -dist2goal.mean() * dist_to_goal_coef
         shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)
-        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+        subgoal_shadow_penalty = shadow_cost.mean() * subgoal_shadow_coef
         sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
 
         save_data = should_update
@@ -485,6 +501,8 @@ def test_rollout_subgoal(
     # 初始化：第一个subgoal就是最终目标
     init_subgoal = env.get_agent_goals(init_graph)
 
+    goal_reward_coef, subgoal_bonus_coef, subgoal_shadow_coef, dist_to_goal_coef = _resolve_coefs(env)
+
     def body_(data, inp_data):
         graph, rnn_state, current_subgoal, step_count = data
         key_ = inp_data
@@ -548,19 +566,19 @@ def test_rollout_subgoal(
         dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
         # 1. 到达最终目标的奖励 (使用 reach_thresh)
-        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
-        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * goal_reward_coef
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * goal_reward_coef
 
         # 2. 到达 subgoal 的奖励 (鼓励生成可达的 subgoal)
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
-        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * subgoal_bonus_coef
 
         # 3. agent 距离 goal 的 dense reward
-        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        dist_agent_to_goal = -dist2goal.mean() * dist_to_goal_coef
 
         # 4. subgoal 阴影区惩罚（与训练时一致）
         shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)  # (n_agents,), -1或0
-        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+        subgoal_shadow_penalty = shadow_cost.mean() * subgoal_shadow_coef
 
         sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
 
@@ -638,6 +656,8 @@ def test_rollout_subgoal_manifold(
     init_subgoal = env.get_agent_goals(init_graph)
     init_s_all = env.manifold_init_slack(init_graph)
 
+    goal_reward_coef, subgoal_bonus_coef, subgoal_shadow_coef, dist_to_goal_coef = _resolve_coefs(env)
+
     def body_(data, inp_data):
         graph, rnn_state, current_subgoal, step_count, s_all = data
         key_ = inp_data
@@ -676,14 +696,14 @@ def test_rollout_subgoal_manifold(
         goal_pos = real_goal[:, :env.action_dim]
         dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
-        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
-        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * GOAL_REWARD_COEF
+        goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * goal_reward_coef
+        # goal_reward = jnp.where(dist2goal < reach_thresh, 1.0, 0.0).mean() * goal_reward_coef
 
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
-        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * SUBGOAL_BONUS_COEF
-        dist_agent_to_goal = -dist2goal.mean() * DIST_TO_GOAL_COEF
+        subgoal_bonus = jnp.where(dist2subgoal < SUBGOAL_BONUS_THRESH, 1, 0.0).mean() * subgoal_bonus_coef
+        dist_agent_to_goal = -dist2goal.mean() * dist_to_goal_coef
         shadow_cost = env.get_subgoal_shadow_cost(graph, new_subgoal)
-        subgoal_shadow_penalty = shadow_cost.mean() * SUBGOAL_SHADOW_COEF
+        subgoal_shadow_penalty = shadow_cost.mean() * subgoal_shadow_coef
         sparse_reward = goal_reward + subgoal_bonus + dist_agent_to_goal + subgoal_shadow_penalty
 
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1, s_new), (

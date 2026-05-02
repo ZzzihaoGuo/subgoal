@@ -23,6 +23,11 @@ from dgppo.utils.utils import tree_index, MutablePatchCollection, save_anim
 
 class LidarBicycleTarget(LidarTarget):
 
+    # Per-env sparse-reward 系数（utils.py 模块默认值复制于此，可按需调整）
+    GOAL_REWARD_COEF = 0.1
+    SUBGOAL_BONUS_COEF = 0.0
+    SUBGOAL_SHADOW_COEF = 0.0
+
     PARAMS = {
         "car_radius": 0.05,
         "comm_radius": 0.5,

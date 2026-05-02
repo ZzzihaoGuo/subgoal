@@ -1,9 +1,9 @@
 #!/bin/bash
 # Sweep test: vary num_agents and obs, collect results
 
-PATH_MODEL="${1:-logs/LidarSpread/informarl_subgoal/seed0_330202319_GNZH}"
+PATH_MODEL="${1:-logs/LidarTarget/informarl_subgoal/seed10_501002748_RJWW}"
 EPI="${2:-1000}"
-RESULT_FILE="sweep_results_manifold_spread.txt"
+RESULT_FILE="generalization_result/spread/sweep_results_HMM_spread_0.txt"
 
 echo "=== Sweep Test ===" | tee "$RESULT_FILE"
 echo "Model path: $PATH_MODEL" | tee -a "$RESULT_FILE"

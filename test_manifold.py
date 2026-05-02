@@ -354,7 +354,7 @@ def main():
 
     # required
     # parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
-    parser.add_argument("--path", type=str, default="logs/CrazyFlie/informarl_subgoal/seed0_422102500_KIEW")
+    parser.add_argument("--path", type=str, default="logs/LidarTarget/informarl_subgoal/seed30_501225024_NKUU")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
@@ -367,8 +367,8 @@ def main():
     parser.add_argument("--w-slack", type=float, default=10.0, help="Slack weight in pseudo-inverse (higher = prefer action correction)")
 
     # test parameters
-    parser.add_argument("--no-video", action="store_true", default=False)
-    parser.add_argument("--epi", type=int, default=5)
+    parser.add_argument("--no-video", action="store_true", default=True)
+    parser.add_argument("--epi", type=int, default=1000)
     parser.add_argument("--step", type=int, default=None)
     parser.add_argument("--obs", type=int, default=None)
     parser.add_argument("--stochastic", action="store_true", default=False)
@@ -378,7 +378,7 @@ def main():
     parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--subgoal-interval", type=int, default=8)
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
-    parser.add_argument("--max-delta", type=float, default=0.4)
+    parser.add_argument("--max-delta", type=float, default=None)
 
     # default
     parser.add_argument("-n", "--num-agents", type=int, default=None)

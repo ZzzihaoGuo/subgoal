@@ -58,6 +58,11 @@ class CrazyFlie(LinearDrone):
 
     GOAL_ASSIGNMENT = "target"
 
+    # Per-env sparse-reward 系数（utils.py 模块默认值复制于此，可按需调整）
+    GOAL_REWARD_COEF = 0.1
+    SUBGOAL_BONUS_COEF = 0.0
+    SUBGOAL_SHADOW_COEF = 0.0
+
     X, Y, Z, PSI, THETA, PHI, U, V, W, R, Q, P = range(12)
     F_1, F_2, F_3, F_4 = range(4)
     L_PHI, L_THETA, L_PSI, L_P, L_Q, L_R, L_VX, L_VY, L_VZ = range(9)

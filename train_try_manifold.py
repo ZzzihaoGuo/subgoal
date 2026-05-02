@@ -197,10 +197,10 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, default="CrazyFlie") #LidarLine; LidarTarget; LidarSpread; LidarBicycleTarget; LinearDrone; CrazyFlie
+    parser.add_argument("--env", type=str, default="LidarSpread") #LidarLine; LidarTarget; LidarSpread; LidarBicycleTarget; LinearDrone; CrazyFlie
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--algo", type=str, default="informarl_subgoal")
-    parser.add_argument("--obs", type=int, default=6)
+    parser.add_argument("--obs", type=int, default=3)
 
     # manifold parameters
     parser.add_argument("--topk", type=int, default=3)
@@ -222,8 +222,8 @@ def main():
     # parser.add_argument("--w-slack", type=float, default=0.0)
 
     # custom arguments
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--steps", type=int, default=200000)
+    parser.add_argument("--seed", type=int, default=30)
+    parser.add_argument("--steps", type=int, default=400000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cost-weight", type=float, default=0.)
@@ -239,8 +239,8 @@ def main():
 
     # Subgoal mode arguments
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
-    parser.add_argument("--max-delta", type=float, default=0.1)
-    parser.add_argument("--subgoal-shadow-coef", type=float, default=0.0)  ## need to search 0.1
+    parser.add_argument("--max-delta", type=float, default=0.2)
+    parser.add_argument("--subgoal-shadow-coef", type=float, default=1)  ## need to search 0.1
 
     # NN arguments
     parser.add_argument("--actor-gnn-layers", type=int, default=2)
@@ -261,10 +261,10 @@ def main():
     parser.add_argument("--log-dir", type=str, default="./logs")
     parser.add_argument("--eval-interval", type=int, default=100)
     parser.add_argument("--eval-epi", type=int, default=1)
-    parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument("--save-interval", type=int, default=10000)
 
     parser.add_argument("--subgoal-interval", type=int, default=8)
-    parser.add_argument("--max-step", type=int, default=256)
+    parser.add_argument("--max-step", type=int, default=128)
 
     args = parser.parse_args()
 

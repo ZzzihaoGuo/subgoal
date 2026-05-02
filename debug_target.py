@@ -27,7 +27,9 @@ def make_subgoals(init_pos: np.ndarray, goal_pos: np.ndarray, n_subgoals: int) -
 
 
 def test_low_level(env_id, n_agents=3, n_obs=4, max_step=128, n_episodes=5,
-                   use_manifold=False, dim=2, n_subgoals=4, switch_thresh=0.05):
+                   use_manifold=False, dim=2, n_subgoals=4, steps_per_subgoal=None,
+                   switch_thresh=0.05):
+    """steps_per_subgoal: 若不为 None, 按时间切换 (每 N 步推进 1 个 subgoal); 否则按距离 switch_thresh 切换."""
     env = make_env(env_id=env_id, num_agents=n_agents, num_obs=n_obs, max_step=max_step)
 
     if use_manifold:
@@ -43,7 +45,8 @@ def test_low_level(env_id, n_agents=3, n_obs=4, max_step=128, n_episodes=5,
         jax.block_until_ready(action)
         print("Manifold warmup done.\n")
 
-    tag = ("manifold" if use_manifold else "nominal") + f"_sg{n_subgoals}"
+    mode = f"sps{steps_per_subgoal}" if steps_per_subgoal is not None else f"sg{n_subgoals}"
+    tag = ("manifold" if use_manifold else "nominal") + f"_{mode}"
 
     for epi in range(n_episodes):
         key = jr.PRNGKey(epi)
@@ -66,16 +69,18 @@ def test_low_level(env_id, n_agents=3, n_obs=4, max_step=128, n_episodes=5,
         for step in range(max_step):
             agent_pos = np.array(graph.type_states(type_idx=0, n_type=env.num_agents)[:, :dim])
 
-            # 每 agent 选当前 subgoal; 距离 < switch_thresh 且不是最后一个则推进
+            # 选当前 subgoal: 时间模式 (每 steps_per_subgoal 步推进) 或 距离模式 (近到 switch_thresh 推进)
             target_pos = np.zeros_like(agent_pos)
             for a in range(env.num_agents):
-                idx = cur_idx[a]
-                tgt = subgoals[idx, a]
-                d = np.linalg.norm(tgt - agent_pos[a])
-                if d < switch_thresh and idx < n_subgoals - 1:
-                    cur_idx[a] = idx + 1
+                if steps_per_subgoal is not None:
+                    cur_idx[a] = min(step // steps_per_subgoal, n_subgoals - 1)
+                else:
                     idx = cur_idx[a]
-                target_pos[a] = subgoals[idx, a]
+                    tgt = subgoals[idx, a]
+                    d = np.linalg.norm(tgt - agent_pos[a])
+                    if d < switch_thresh and idx < n_subgoals - 1:
+                        cur_idx[a] = idx + 1
+                target_pos[a] = subgoals[cur_idx[a], a]
 
             # 只有所有 agent 都到了最后一个 subgoal 才用 final_goal P-control 减速
             is_final_goal = bool(np.all(cur_idx == n_subgoals - 1))
@@ -144,11 +149,15 @@ def test_low_level(env_id, n_agents=3, n_obs=4, max_step=128, n_episodes=5,
 if __name__ == "__main__":
     import sys
     env_id = sys.argv[1] if len(sys.argv) > 1 else "CrazyFlie"
-    n_subgoals = int(sys.argv[2]) if len(sys.argv) > 2 else 4
+    # 默认: max_step=128, 每 8 步换一个 subgoal => 16 个 subgoal, 时间切换
+    max_step = 128
+    steps_per_subgoal = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+    n_subgoals = max_step // steps_per_subgoal
     use_manifold = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
     print("=" * 60)
-    print(f"Test: {env_id} u_ref + {n_subgoals} subgoals (manifold={use_manifold})")
+    print(f"Test: {env_id} u_ref + {n_subgoals} subgoals "
+          f"(time-switch every {steps_per_subgoal} steps, manifold={use_manifold})")
     print("=" * 60)
-    test_low_level(env_id, n_agents=3, n_obs=4, max_step=128,
+    test_low_level(env_id, n_agents=3, n_obs=4, max_step=max_step,
                    n_episodes=3, use_manifold=use_manifold, dim=3,
-                   n_subgoals=n_subgoals)
+                   n_subgoals=n_subgoals, steps_per_subgoal=steps_per_subgoal)

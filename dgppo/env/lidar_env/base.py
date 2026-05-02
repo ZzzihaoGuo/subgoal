@@ -432,14 +432,14 @@ class LidarEnv(MultiAgentEnv, ABC):
             direction_unit = jnp.where(dist > 1e-6, direction / dist, 0.0)
             
             # 根据距离和是否是最终目标，设定期望速度
-            max_vel = 0.7
+            max_vel = 0.7 #0.7
             # 中间subgoal：保持恒定速度（最大速度的50%）
-            cruise_speed = max_vel * 0.01
+            cruise_speed = max_vel * 0.01 #0.01
             # 或者根据距离调整：远离时加速，接近时减速到巡航速度
-            approach_dist = 0.05
+            approach_dist = 0.05 #0.05
             desired_speed = jnp.where(
                 dist > approach_dist,
-                max_vel * 0.8,  # 远离subgoal：70%最大速度
+                max_vel * 0.8,  # 远离subgoal：70%最大速度 0.8
                 cruise_speed    # 接近subgoal：50%最大速度
             )
             desired_vel = direction_unit * desired_speed

@@ -12,6 +12,11 @@ class LidarTarget(LidarEnv):
 
     GOAL_ASSIGNMENT = "target"  # agent_i <-> goal_i 一一对应
 
+    # Per-env sparse-reward 系数（utils.py 模块默认值复制于此，可按需调整）
+    GOAL_REWARD_COEF = 0.00001
+    SUBGOAL_BONUS_COEF = 0.0001
+    SUBGOAL_SHADOW_COEF = 1
+
     PARAMS = {
         "car_radius": 0.05,
         "comm_radius": 0.5,

@@ -1,0 +1,17 @@
+=== Sweep Test ===
+Model path: logs/LidarTarget/informarl_subgoal/seed10_501002748_RJWW
+Episodes per config: 1000
+Started at: Fri May  1 12:04:49 PM UTC 2026
+
+sweep        n      obs    reward       cost         last_dist    safe_rate    success_agent    success_epi     
+========================================================================================================================
+
+--- Sweep 1: fixed obs=3, vary num_agents ---
+vary_n       3      3      -0.4083076
+-1.2499907
+-0.0009176 -0.5471746
+-0.7128307 0.0347320    99.3333333%  44.7666667%      10.2000000%     
+vary_n       5      3      -0.4416603
+-0.9495527
+-0.0010525 -0.5010518
+-0.6182716 0.0413130    98.8400000%  42.0400000%      2.3000000%      
