@@ -28,6 +28,31 @@ from dgppo.utils.typing import Action, Array, Cost, Done, Info, Reward, State
 
 _HERE = os.path.dirname(__file__)
 
+_INTEGRATORS = {
+    "euler": mujoco.mjtIntegrator.mjINT_EULER,
+    "rk4": mujoco.mjtIntegrator.mjINT_RK4,
+    "implicit": mujoco.mjtIntegrator.mjINT_IMPLICIT,
+    "implicitfast": mujoco.mjtIntegrator.mjINT_IMPLICITFAST,
+}
+
+
+def tune_physics(m, integrator=None, iterations=None, ls_iterations=None):
+    """Override the accuracy-oriented defaults that ship in the gym ant.xml.
+
+    The stock file asks for RK4 (4 dynamics evaluations per timestep) and the C-MuJoCo solver
+    defaults iterations=100 / ls_iterations=50, so ONE control step costs FS * 4 = 20 full
+    forward-dynamics solves. That is the dominant cost of this env -- ~220x a bicycle step.
+    Any argument left None keeps whatever the XML specified. See ant_prototype/bench_physics.py
+    for the speed/fidelity trade-off measurements.
+    """
+    if integrator is not None:
+        m.opt.integrator = _INTEGRATORS[str(integrator).lower()]
+    if iterations is not None:
+        m.opt.iterations = int(iterations)
+    if ls_iterations is not None:
+        m.opt.ls_iterations = int(ls_iterations)
+    return m
+
 
 class AntEnvState(NamedTuple):
     """Env state carrying the ant MJX Data. First 3 fields match LidarEnvState so inherited
@@ -55,6 +80,18 @@ class LidarAnt(LidarBicycleTarget):
 
     FS = 5                           # physics substeps per control step
     SETTLE = 40                      # standing settle steps in reset
+    # --- physics speed knobs (see tune_physics and ant_prototype/bench_physics.py) -----
+    # These are the stock ant.xml settings and cost 20 full dynamics solves per control step
+    # (RK4 = 4 evals, times FS = 5), which is the dominant cost of this env.
+    # "implicitfast" + 4/8 is ~an order of magnitude cheaper and was measured to keep the ant
+    # upright and walking straight (z 0.525, up_min 0.999, drift 0.05 m over 10 s) -- BUT it
+    # yields v_fwd 0.131 m/s and 8.5 deg/s of turn authority instead of the 0.22 / 19 that the
+    # CEM gait produced under RK4. VMAX, R_MIN/R_MAX and u_ref's acc scaling are all calibrated
+    # to 0.22, so switching integrator requires re-running the gait search (p05_gait.py) and
+    # re-measuring VMAX first. Until then keep the stock values so the task stays reachable.
+    INTEGRATOR = "rk4"
+    SOLVER_ITER = 100
+    SOLVER_LS_ITER = 50
     VMAX = 0.22                      # measured open-loop forward speed (m/s)
     V_MIN = 0.35 * 0.22              # min cruise so legs keep stepping (needed to turn)
     K_OM = 2.0                       # heading-error -> turn command gain
@@ -69,6 +106,7 @@ class LidarAnt(LidarBicycleTarget):
         area_size = LidarAnt.PARAMS["default_area_size"] if area_size is None else area_size
         super().__init__(num_agents, area_size, max_step, dt, params, cbf_alpha)
         m = mujoco.MjModel.from_xml_path(os.path.join(_HERE, "ant.xml"))
+        tune_physics(m, LidarAnt.INTEGRATOR, LidarAnt.SOLVER_ITER, LidarAnt.SOLVER_LS_ITER)
         self._mjx = mjx.put_model(m)
         # Control dt is fixed by the physics: FS substeps of mjx.step (each = model timestep).
         # Force it regardless of the dt make_env passes (make_env hardcodes 0.03).
