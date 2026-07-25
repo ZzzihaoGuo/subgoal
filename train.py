@@ -15,6 +15,12 @@ from dgppo.trainer.utils import is_connected
 def train(args):
     print(f"> Running train.py {args}")
 
+    # register LidarAnt (MJX ant) at runtime — no edit to dgppo/env/__init__.py
+    from dgppo.env import ENV, LIDAR_ENVS
+    from dgppo.env.lidar_env.lidar_ant import LidarAnt
+    ENV['LidarAnt'] = LidarAnt
+    LIDAR_ENVS.add('LidarAnt')
+
     # set up environment variables and seed
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
     if not is_connected():
@@ -31,6 +37,7 @@ def train(args):
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        max_step=args.max_step,
     )
     env_test = make_env(
         env_id=args.env,
@@ -38,6 +45,7 @@ def train(args):
         num_obs=args.obs,
         n_rays=args.n_rays,
         full_observation=args.full_observation,
+        max_step=args.max_step,
     )
 
     # create algorithm
@@ -145,6 +153,10 @@ def main():
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)
     parser.add_argument("--cost-weight", type=float, default=0.)
+    # None -> make_env's DEFAULT_MAX_STEP (128). LidarAnt needs 256: at VMAX 0.22 m/s and
+    # dt 0.05, 128 steps only cover ~1.4 m while goals sit on a 1.5-2.5 m ring, so the task
+    # is unsolvable and the learning curve stays flat for reasons that are not the algorithm.
+    parser.add_argument("--max-step", type=int, default=None)
     parser.add_argument("--n-rays", type=int, default=32)
     parser.add_argument('--full-observation', action='store_true', default=False)
     parser.add_argument('--clip-eps', type=float, default=0.25)

@@ -51,12 +51,19 @@ def rollout_episodes(path, step=None, max_step=None, epi=20, seed0=1000):
         area_size=env.area_size, use_relative_subgoal=getattr(config, "relative_subgoal", True),
         max_delta=getattr(config, "max_delta", 2.5))
     algo.load(models, step)
-    env.init_manifold(k=config.topk, K=config.viab_gain, Kc=config.err_gain,
-        alpha_max=config.alpha_max, g_act_thresh=config.g_act_thresh,
-        safety_margin=config.safety_margin, n_lookahead=config.n_lookahead, w_slack=config.w_slack)
-    N = env.num_agents; SI = config.subgoal_interval; reach = float(env.params["dist2goal"])
+    N = env.num_agents; reach = float(env.params["dist2goal"])
+    # Hierarchical algos emit a SUBGOAL from act() and need u_ref + the manifold filter to turn
+    # it into an action. Flat algos (dgppo, informarl, ...) emit the action directly and bring
+    # their own learned CBF, so no manifold -- and a train.py config has none of its params.
+    hierarchical = "subgoal" in str(config.algo)
+    if hierarchical:
+        env.init_manifold(k=config.topk, K=config.viab_gain, Kc=config.err_gain,
+            alpha_max=config.alpha_max, g_act_thresh=config.g_act_thresh,
+            safety_margin=config.safety_margin, n_lookahead=config.n_lookahead, w_slack=config.w_slack)
+        SI = config.subgoal_interval
+    print(f"algo={config.algo}  ({'hierarchical' if hierarchical else 'flat'})")
 
-    def rollout(key):
+    def rollout_hier(key):
         g0 = env.reset(key); sg0 = env.get_agent_goals(g0); s0 = env.manifold_init_slack(g0)
         goals = env.get_agent_goals(g0)[:, :2]
 
@@ -79,14 +86,32 @@ def rollout_episodes(path, step=None, max_step=None, epi=20, seed0=1000):
         _, (nav, subgoal, qpos, unsafe) = jax.lax.scan(body, init, jr.split(key, env.max_episode_steps))
         return jnp.linalg.norm(nav[-1] - goals, axis=-1), unsafe.any(), nav, subgoal, qpos, goals
 
+    def rollout_flat(key):
+        g0 = env.reset(key)
+        goals = env.get_agent_goals(g0)[:, :2]
+
+        def body(carry, k):
+            graph, rnn = carry
+            action, new_rnn = algo.act(graph, rnn)      # the action itself, every env step
+            ng, r, c, d, _ = env.step(graph, env.clip_action(action))
+            log = (graph.type_states(0, N)[:, :2], graph.env_states.data.qpos, jnp.any(c >= 0.0))
+            return (ng, new_rnn), log
+
+        _, (nav, qpos, unsafe) = jax.lax.scan(
+            body, (g0, algo.init_rnn_state), jr.split(key, env.max_episode_steps))
+        return jnp.linalg.norm(nav[-1] - goals, axis=-1), unsafe.any(), nav, None, qpos, goals
+
+    rollout = rollout_hier if hierarchical else rollout_flat
+
     roll = jax.jit(rollout)
     finals, ep_unsafe, traj = [], [], None
     for e in range(epi):
         fd, un, nav, sg, qpos, goals = roll(jr.PRNGKey(seed0 + e))
         finals.append(np.array(fd)); ep_unsafe.append(bool(un))
         if e == 0:
-            traj = dict(nav=np.array(nav), subgoal=np.array(sg), qpos=np.array(qpos),
-                        goals=np.array(goals), car_radius=float(env.params["car_radius"]),
+            traj = dict(nav=np.array(nav), qpos=np.array(qpos), goals=np.array(goals),
+                        subgoal=None if sg is None else np.array(sg),   # flat algos have none
+                        car_radius=float(env.params["car_radius"]),
                         area=float(env.area_size), dist2goal=reach)
     finals = np.stack(finals)                                    # (epi, N)
     reached = finals < reach
@@ -126,7 +151,8 @@ def render(traj, step, path, hist=4, fps=15):
     GT = np.array([mj.geom_type[g] for g in range(mj.ngeom)])
     GS = np.array([mj.geom_size[g] for g in range(mj.ngeom)])
     COL = ['#1f5fa8', '#d9541e', '#2ca25f', '#8e44ad', '#c0392b']
-    CHG = subgoal_change_frames(subgoal)       # frames where a new subgoal was issued
+    # flat algos (dgppo, ...) have no subgoal layer -- draw the trajectories without it
+    CHG = subgoal_change_frames(subgoal) if subgoal is not None else None
     ZTOP = 1.0                                 # 3D z limit; markers are drawn on the ground (z=0)
     # safety envelope: the ant's leg-reach circle (car_radius), extruded into a vertical
     # cylinder -- agent-agent safe iff centre distance >= 2R, agent-obstacle iff >= R.
@@ -136,7 +162,7 @@ def render(traj, step, path, hist=4, fps=15):
     imgs = []
     for fi in range(0, T, max(1, T//90)):
         # last `hist` issued subgoals, oldest first -> alpha ramps from faint to solid
-        h = CHG[CHG <= fi][-hist:]
+        h = CHG[CHG <= fi][-hist:] if CHG is not None else []
         alphas = np.linspace(0.15, 1.0, len(h))
 
         fig = plt.figure(figsize=(9.6, 4.6))
@@ -170,8 +196,9 @@ def render(traj, step, path, hist=4, fps=15):
                 ax.scatter([sx], [sy], [0.0], marker='D', facecolors='none', edgecolors=COL[i % 5],
                            s=42, lw=1.4, alpha=al, depthshade=False)
                 ax.plot([sx, sx], [sy, sy], [0.0, 0.16], '-', c=COL[i % 5], lw=0.8, alpha=al*0.7)
-            ax.plot([nav[fi, i, 0], subgoal[fi, i, 0]], [nav[fi, i, 1], subgoal[fi, i, 1]], [ztorso, 0.0],
-                    '--', c=COL[i % 5], lw=1.2, alpha=0.9)
+            if subgoal is not None:
+                ax.plot([nav[fi, i, 0], subgoal[fi, i, 0]], [nav[fi, i, 1], subgoal[fi, i, 1]],
+                        [ztorso, 0.0], '--', c=COL[i % 5], lw=1.2, alpha=0.9)
             ax.scatter([goals[i, 0]], [goals[i, 1]], [0.0], marker='*', c=COL[i % 5], s=140,
                        edgecolor='k', lw=0.4, depthshade=False)
         ax.set_xlim(0, AREA); ax.set_ylim(0, AREA); ax.set_zlim(0, ZTOP)
@@ -186,14 +213,16 @@ def render(traj, step, path, hist=4, fps=15):
             for t, al in zip(h, alphas):
                 ax2.scatter(*subgoal[t, i], marker='D', facecolor='none', edgecolor=COL[i % 5],
                             s=55, lw=1.6, zorder=6, alpha=al)
-            ax2.plot([nav[fi, i, 0], subgoal[fi, i, 0]], [nav[fi, i, 1], subgoal[fi, i, 1]],
-                     '--', c=COL[i % 5], lw=1.0, alpha=0.9, zorder=4)
+            if subgoal is not None:
+                ax2.plot([nav[fi, i, 0], subgoal[fi, i, 0]], [nav[fi, i, 1], subgoal[fi, i, 1]],
+                         '--', c=COL[i % 5], lw=1.0, alpha=0.9, zorder=4)
             ax2.scatter(*nav[fi, i], c=COL[i % 5], s=55, zorder=6, edgecolor='k', lw=0.5)
             ax2.scatter(*goals[i], marker='*', c=COL[i % 5], s=200, zorder=5, edgecolor='k', lw=0.5)
         d2g = np.linalg.norm(nav[fi] - goals, axis=-1)
         ax2.set_xlim(0, AREA); ax2.set_ylim(0, AREA); ax2.set_aspect('equal'); ax2.grid(alpha=.3)
-        ax2.set_title(f"dot=ant  diamond=subgoal (faded=older)  star=goal\nmean d2g = {d2g.mean():.2f}",
-                      fontsize=10)
+        legend = "dot=ant  diamond=subgoal (faded=older)  star=goal" if subgoal is not None \
+            else "dot=ant  star=goal  (flat policy: no subgoal layer)"
+        ax2.set_title(f"{legend}\nmean d2g = {d2g.mean():.2f}", fontsize=10)
         fig.subplots_adjust(left=0.0, right=0.96, bottom=0.06, top=0.90, wspace=0.02)
         fig.canvas.draw()
         img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8).reshape(

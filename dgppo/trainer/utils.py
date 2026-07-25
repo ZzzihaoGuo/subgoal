@@ -436,8 +436,11 @@ def rollout(
         action, log_pi, new_rnn_state = actor(graph, rnn_state, key_)
         next_graph, reward, cost, done, info = env.step(graph, action)
 
+        # store lightened graphs (lets an env drop heavy, training-irrelevant env_states like
+        # the MJX Data — no-op for envs that don't override lighten_graph).
         return ((next_graph, new_rnn_state),
-                (graph, action, rnn_state, reward, cost, done, log_pi, next_graph))
+                (env.lighten_graph(graph), action, rnn_state, reward, cost, done, log_pi,
+                 env.lighten_graph(next_graph)))
 
     keys = jax.random.split(key, env.max_episode_steps)
     _, (graphs, actions, rnn_states, rewards, costs, dones, log_pis, next_graphs) = (
