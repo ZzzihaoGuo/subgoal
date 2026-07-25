@@ -88,7 +88,7 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         # CBF 参数
         self.cbf_alpha = cbf_alpha
-        self.k = 21  # 考虑最近的 k 个邻居
+        self.k = 3  # 考虑最近的 k 个邻居 (matches gcbfplus reference)
         self._cbf = None  # 延迟初始化
         self._manifold = None  # 延迟初始化: manifold 修正函数
         self._manifold_init_slack = None  # 延迟初始化: 松弛变量初始化函数
@@ -448,10 +448,11 @@ class LidarEnv(MultiAgentEnv, ABC):
             # 使用 jnp.where 替代 if/else
             desired_vel = jnp.where(
                 is_final_goal,
-                # jnp.zeros_like(desired_vel),  # 最终目标：速度为0
-                # desired_vel                    # 中间subgoal：保持速度
-                direction_unit * jnp.clip(dist * 0.0, 0.0, max_vel * 0.0),  # 最终目标：根据距离平滑减速到0                                                                  
-                desired_vel                                                  # 中间subgoal：保持速度  
+                # 新版本：最终目标按距离正比减速（远处 0.35，dist=0.05 时 0.25，dist→0 时 →0）
+                # direction_unit * jnp.clip(dist * 5.0, 0.0, max_vel * 0.5),
+                # 旧版本：最终目标速度强制为 0
+                direction_unit * jnp.clip(dist * 0.0, 0.0, max_vel * 0.0),
+                desired_vel                                                  # 中间subgoal：保持速度
             )
             goal = jnp.concatenate([goal_pos, desired_vel], axis=-1)
     
@@ -599,7 +600,7 @@ class LidarEnv(MultiAgentEnv, ABC):
 
         qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
         settings = JaxProxQP.Settings.default()
-        settings.max_iter = 4
+        settings.max_iter = 100
 
         settings.dua_gap_thresh_abs = None
         solver = JaxProxQP(qp, settings)
@@ -643,7 +644,7 @@ class LidarEnv(MultiAgentEnv, ABC):
         # Solve QP
         qp = JaxProxQP.QPModel.create(H, g, k_C, k_b, l_box, u_box)
         settings = JaxProxQP.Settings.default()
-        settings.max_iter = 4
+        settings.max_iter = 100
         settings.dua_gap_thresh_abs = None
         solver = JaxProxQP(qp, settings)
         sol = solver.solve()

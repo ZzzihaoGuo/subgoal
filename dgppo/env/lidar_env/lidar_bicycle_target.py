@@ -24,9 +24,10 @@ from dgppo.utils.utils import tree_index, MutablePatchCollection, save_anim
 class LidarBicycleTarget(LidarTarget):
 
     # Per-env sparse-reward 系数（utils.py 模块默认值复制于此，可按需调整）
-    GOAL_REWARD_COEF = 0.1
-    SUBGOAL_BONUS_COEF = 0.0
-    SUBGOAL_SHADOW_COEF = 0.0
+    GOAL_REWARD_COEF = 0.0001 # 0.2 
+    SUBGOAL_BONUS_COEF = 0.000001 # 0.02
+    SUBGOAL_SHADOW_COEF = 0.1
+    DIST_TO_GOAL_COEF = 0.2  # 0.02 0.2 
 
     PARAMS = {
         "car_radius": 0.05,
@@ -174,6 +175,8 @@ class LidarBicycleTarget(LidarTarget):
             Ta_is_unsafe=None,
             viz_opts: dict = None,
             dpi: int = 100,
+            show_subgoal: bool = False,
+            subgoal_interval: int = 8,
             **kwargs
     ) -> None:
         n_rays = self.params["top_k_rays"] if self.params["n_obs"] > 0 else 0
@@ -271,9 +274,59 @@ class LidarBicycleTarget(LidarTarget):
         if "Vh" in viz_opts:
             Vh_text = ax.text(0.99, 0.99, "Vh: []", va="top", ha="right", zorder=100, **text_font_opts)
 
+        # ===== subgoals (跟 plot.py:render_lidar 同款逻辑) =====
+        subgoal_color = "#ff6600"
+        subgoal_markers = []        # 当前 subgoal ★
+        subgoal_lines = []          # 当前 agent → 当前 subgoal 虚线
+        subgoal_history_markers = [[] for _ in range(n_agent)]  # 历史 subgoal ★（带渐隐）
+        subgoal_history_lines = [[] for _ in range(n_agent)]    # 历史相邻 subgoal 之间的连线
+        subgoal_history = [[] for _ in range(n_agent)]          # [agent_idx] -> [(t, pos), ...]
+
+        if show_subgoal:
+            subgoal_pos_0 = np.array(rollout.actions[0, :, :2])  # (n_agent, 2)
+            agent_pos_0 = np.array(graph0.states[:n_agent, :2])
+
+            # 预收集每个 interval 边界的 subgoal
+            total_steps = len(rollout.actions)
+            for t in range(0, total_steps, subgoal_interval):
+                for ii in range(n_agent):
+                    subgoal_history[ii].append((t, np.array(rollout.actions[t, ii, :2])))
+
+            max_history_per_agent = len(subgoal_history[0]) if subgoal_history[0] else 0
+            for ii in range(n_agent):
+                # 历史 marker（初始全透明）
+                for _ in range(max_history_per_agent):
+                    m, = ax.plot([], [], marker='*', markersize=12, color=subgoal_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 alpha=0, zorder=5, linestyle="")
+                    subgoal_history_markers[ii].append(m)
+                # 历史 marker 之间的连线
+                for _ in range(max(0, max_history_per_agent - 1)):
+                    ln, = ax.plot([], [], '-', color=subgoal_color, linewidth=1.5,
+                                  alpha=0, zorder=4)
+                    subgoal_history_lines[ii].append(ln)
+
+            # 当前 subgoal 高亮 marker + 连线（不透明）
+            for ii in range(n_agent):
+                m, = ax.plot([subgoal_pos_0[ii, 0]], [subgoal_pos_0[ii, 1]],
+                             marker='*', markersize=15, color=subgoal_color,
+                             markeredgecolor='black', markeredgewidth=1, zorder=8, linestyle="")
+                subgoal_markers.append(m)
+                ln, = ax.plot([agent_pos_0[ii, 0], subgoal_pos_0[ii, 0]],
+                              [agent_pos_0[ii, 1], subgoal_pos_0[ii, 1]],
+                              '--', color=subgoal_color, linewidth=1.5, alpha=0.7, zorder=4)
+                subgoal_lines.append(ln)
+
+        # 收集所有历史 artist 平铺供 blit 用
+        all_history_artists = []
+        for ii in range(n_agent):
+            all_history_artists.extend(subgoal_history_markers[ii])
+            all_history_artists.extend(subgoal_history_lines[ii])
+
         # init function for animation
         def init_fn() -> list[plt.Artist]:
-            return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, kk_text]
+            return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, kk_text,
+                    *subgoal_markers, *subgoal_lines, *all_history_artists]
 
         # update function for animation
         def update(kk: int) -> list[plt.Artist]:
@@ -328,7 +381,57 @@ class LidarBicycleTarget(LidarTarget):
 
             kk_text.set_text("kk={:04}".format(kk))
 
-            return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, kk_text]
+            # ===== 更新 subgoals =====
+            if show_subgoal and kk < len(rollout.actions):
+                subgoal_pos_t = np.array(rollout.actions[kk, :, :2])
+                agent_pos_t = np.array(graph.states[:n_agent, :2])
+
+                # 历史 subgoal 渐隐
+                for ii in range(n_agent):
+                    for hist_idx, (hist_t, hist_pos) in enumerate(subgoal_history[ii]):
+                        if hist_t <= kk:
+                            age = kk - hist_t
+                            max_age = kk
+                            if max_age > 0:
+                                alpha = max(0.15, 0.8 - 0.6 * (age / max(max_age, 1)))
+                            else:
+                                alpha = 0.8
+                            current_interval_start = (kk // subgoal_interval) * subgoal_interval
+                            if hist_t == current_interval_start:
+                                alpha = 0  # 当前那个用主 marker 显示，避免重叠
+                            subgoal_history_markers[ii][hist_idx].set_data([hist_pos[0]], [hist_pos[1]])
+                            subgoal_history_markers[ii][hist_idx].set_alpha(alpha)
+                        else:
+                            subgoal_history_markers[ii][hist_idx].set_alpha(0)
+
+                    # 相邻 subgoal 之间连线
+                    for line_idx in range(len(subgoal_history_lines[ii])):
+                        if line_idx + 1 < len(subgoal_history[ii]):
+                            t1, pos1 = subgoal_history[ii][line_idx]
+                            t2, pos2 = subgoal_history[ii][line_idx + 1]
+                            if t2 <= kk:
+                                age = kk - t1
+                                max_age = kk
+                                if max_age > 0:
+                                    line_alpha = max(0.1, 0.7 - 0.5 * (age / max(max_age, 1)))
+                                else:
+                                    line_alpha = 0.7
+                                subgoal_history_lines[ii][line_idx].set_data(
+                                    [pos1[0], pos2[0]], [pos1[1], pos2[1]])
+                                subgoal_history_lines[ii][line_idx].set_alpha(line_alpha)
+                            else:
+                                subgoal_history_lines[ii][line_idx].set_alpha(0)
+
+                # 当前 subgoal marker + 连线
+                for ii in range(n_agent):
+                    subgoal_markers[ii].set_data([subgoal_pos_t[ii, 0]], [subgoal_pos_t[ii, 1]])
+                    subgoal_lines[ii].set_data(
+                        [agent_pos_t[ii, 0], subgoal_pos_t[ii, 0]],
+                        [agent_pos_t[ii, 1], subgoal_pos_t[ii, 1]],
+                    )
+
+            return [agent_col, edge_col, *agent_labels, cost_text, *safe_text, kk_text,
+                    *subgoal_markers, *subgoal_lines, *all_history_artists]
 
         fps = 30.0
         spf = 1 / fps

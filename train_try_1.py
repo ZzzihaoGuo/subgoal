@@ -225,8 +225,10 @@ def main():
                         help="CBF parameter α₁ for paper CBF (only used if --use-paper-cbf)")
     parser.add_argument("--cbf-alpha2", type=float, default=30.0,
                         help="CBF parameter α₂ for paper CBF (only used if --use-paper-cbf)")
-    parser.add_argument("--use-cbf-closed-form", action="store_true", default=True,
-                        help="Use closed-form CBF solver (10-50x faster than QP)")
+    parser.add_argument("--use-cbf-closed-form",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Use closed-form CBF solver (10-50x faster than QP). "
+                             "Default OFF → exact QP. Pass --use-cbf-closed-form to enable.")
     parser.add_argument("--cbf-std-alpha1", type=float, default=10.0,
                         help="Standard CBF parameter α₁ (used in CBF value computation in utils.py)")
 

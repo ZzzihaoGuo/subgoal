@@ -25,7 +25,7 @@ else:
 GOAL_REWARD_COEF = 0.0          # goal_reward 系数
 
 SUBGOAL_BONUS_THRESH = 0.02     # subgoal_bonus 判断阈值
-SUBGOAL_BONUS_COEF = 0.001       # subgoal_bonus 系数
+SUBGOAL_BONUS_COEF = 0.0001       # subgoal_bonus 系数
 DIST_TO_GOAL_COEF = 0.1        # dist_agent_to_goal 系数
 
 SUBGOAL_SHADOW_COEF = 1.00     # subgoal_shadow_cost 系数（生成在障碍物阴影区的惩罚）0, 0.01, 0.1, 1  # 可通过 --subgoal-shadow-coef 覆盖
@@ -291,9 +291,11 @@ def rollout_hierarchical_manifold(
 
         save_data = should_update
 
+        # carry keeps full graphs (for stepping); stored history is lightened (strips heavy
+        # env_states like the MJX Data — no-op for envs that don't override lighten_graph).
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1, s_new), (
-            graph, new_subgoal, rnn_state, reward, cost, done, log_pi,
-            next_graph, save_data, sparse_reward,
+            env.lighten_graph(graph), new_subgoal, rnn_state, reward, cost, done, log_pi,
+            env.lighten_graph(next_graph), save_data, sparse_reward,
         )
 
     keys = jax.random.split(key, env.max_episode_steps)
@@ -374,9 +376,11 @@ def rollout_hierarchical_manifold_vmas(
 
         save_data = should_update
 
+        # carry keeps full graphs (for stepping); stored history is lightened (strips heavy
+        # env_states like the MJX Data — no-op for envs that don't override lighten_graph).
         return (next_graph, new_rnn_state, new_subgoal, step_count + 1, s_new), (
-            graph, new_subgoal, rnn_state, reward, cost, done, log_pi,
-            next_graph, save_data, sparse_reward,
+            env.lighten_graph(graph), new_subgoal, rnn_state, reward, cost, done, log_pi,
+            env.lighten_graph(next_graph), save_data, sparse_reward,
         )
 
     keys = jax.random.split(key, env.max_episode_steps)

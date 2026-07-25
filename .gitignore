@@ -5,3 +5,20 @@ wandb
 logs
 media
 *.egg-info
+.claude/
+
+# heavy, regenerable artefacts
+plot/
+results_nominal_manifold/
+results_sweep/
+*.out
+train_bicycle_A_D.log
+train_crazyflie.log
+
+# ant prototype: keep the code + gait asset, drop rollout dumps and scratch renders
+ant_prototype/*.pkl
+ant_prototype/*.log
+ant_prototype/*.png
+ant_prototype/gifs/*
+!ant_prototype/gifs/ant_eval_step1000_sg3d.gif
+!ant_prototype/gifs/ant_subgoal_follow_square.gif

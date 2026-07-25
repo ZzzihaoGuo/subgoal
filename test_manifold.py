@@ -24,6 +24,7 @@ from dgppo.trainer.data import Rollout
 from dgppo.trainer.utils import (
     GOAL_REWARD_COEF, SUBGOAL_BONUS_THRESH, SUBGOAL_BONUS_COEF,
     DIST_TO_GOAL_COEF, SUBGOAL_SHADOW_COEF,
+    _compute_dist2goal,
 )
 from dgppo.utils.graph import GraphsTuple
 from dgppo.utils.utils import jax_jit_np, jax_vmap
@@ -86,9 +87,9 @@ def manifold_rollout(
         goals = real_goal
         agent_pos = agent_states[:, :env.action_dim]
         goal_pos = goals[:, :env.action_dim]
-        dist2goal = jnp.linalg.norm(
-            jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
-        ).min(axis=1)
+        # 按 env.GOAL_ASSIGNMENT 选 dist2goal 语义：
+        # target → i↔i 严格配对；spread/line → 每个 goal 找最近 agent (min over agents)
+        dist2goal = _compute_dist2goal(env, goal_pos, agent_pos)
 
         goal_reward = jnp.where(dist2goal < reach_thresh, 0.0, -1.0).mean() * GOAL_REWARD_COEF
         dist2subgoal = jnp.linalg.norm(agent_pos - new_subgoal, axis=-1)
@@ -221,11 +222,15 @@ def test(args):
     test_keys = jr.split(test_key, 1_000)[: args.epi]
     test_keys = test_keys[args.offset:]
 
+    # reach threshold: CLI override (e.g. for bicycle) > env default
+    reach_thresh_val = float(args.reach_thresh) if args.reach_thresh is not None \
+        else float(env.params.get("dist2goal", 0.01))
+
     # 自定义 rollout (带松弛变量积分)
     rollout_fn = ft.partial(
         manifold_rollout, env, act_fn, init_rnn_state,
         stochastic=args.stochastic, subgoal_interval=args.subgoal_interval,
-        reach_thresh=float(env.params.get("dist2goal", 0.01)),
+        reach_thresh=reach_thresh_val,
     )
     rollout_fn = jax_jit_np(rollout_fn)
 
@@ -237,7 +242,8 @@ def test(args):
 
     # test
     rewards, costs, rollouts, is_unsafes, rates = [], [], [], [], []
-    last_rewards, last_dists, is_success_list, success_rates_per_epi = [], [], [], []
+    last_rewards, last_dists, is_reached_list, reach_rates_per_epi = [], [], [], []
+    epi_safe_list = []  # 每个 epi 是否全程 safe
 
     for i_epi in range(args.epi):
         key_x0, _ = jr.split(test_keys[i_epi], 2)
@@ -254,8 +260,10 @@ def test(args):
         last_dists.append(last_dist)
         rollouts.append(rollout)
         safe_rate = 1 - is_unsafes[-1].max(axis=0).mean()
+        epi_safe = bool(safe_rate >= 1.0)
+        epi_safe_list.append(epi_safe)
 
-        dist_thresh = env.params.get("dist2goal", 0.01)
+        dist_thresh = reach_thresh_val
         if rollout.dist2goal is not None:
             final_dist = rollout.dist2goal[-1]
         else:
@@ -266,13 +274,20 @@ def test(args):
                 jnp.expand_dims(goal_pos, 1) - jnp.expand_dims(agent_pos, 0), axis=-1
             ).min(axis=1)
         agent_reached = np.array(final_dist < dist_thresh)
-        is_success_list.append(agent_reached)
-        epi_all_success = float(agent_reached.all())
-        success_rates_per_epi.append(epi_all_success)
+        is_reached_list.append(agent_reached)
+        epi_all_reached = float(agent_reached.all())
+        reach_rates_per_epi.append(epi_all_reached)
+
+        # success_agent: 个体 safe AND 个体 reach (per-agent 比例)
+        # success_epi  : 全 epi safe AND 全到达 (0/100 二值)
+        agent_safe_in_epi = ~np.array(is_unsafes[-1]).max(axis=0)            # (n_agents,) per-agent 是否全程无碰撞
+        success_agent_pct = (agent_safe_in_epi & agent_reached).mean() * 100
+        success_epi_pct = float(epi_safe and bool(agent_reached.all())) * 100
 
         print(f"epi: {i_epi}, reward: {epi_reward:.7f}, cost: {epi_cost:.7f}, "
-              f"last_reward: {last_reward:.7f}, last_dist: {last_dist:.7f}, safe rate: {safe_rate * 100:.7f}%, "
-              f"success: {agent_reached.mean() * 100:.1f}% ({agent_reached.sum()}/{len(agent_reached)})")
+              f"last_reward: {last_reward:.7f}, last_dist: {last_dist:.7f}, safe: {safe_rate * 100:.1f}%, "
+              f"reach: {agent_reached.mean() * 100:.1f}% ({agent_reached.sum()}/{len(agent_reached)}), "
+              f"success_agent: {success_agent_pct:.1f}%, success_epi: {success_epi_pct:.0f}%")
 
         # === debug: 碰撞时刻分析 ===
         if safe_rate < 1.0:
@@ -315,17 +330,28 @@ def test(args):
 
         rates.append(np.array(safe_rate))
 
-    is_unsafe = np.max(np.stack(is_unsafes), axis=1)
-    safe_mean, safe_std = (1 - is_unsafe).mean(), (1 - is_unsafe).std()
-    is_success = np.stack(is_success_list)
-    success_agent_mean = is_success.mean()
-    success_epi_mean = np.mean(success_rates_per_epi)
+    is_unsafe = np.max(np.stack(is_unsafes), axis=1)                    # (n_epi, n_agent) — agent_i 在 epi_j 是否曾碰撞
+    agent_safe = ~is_unsafe                                              # (n_epi, n_agent) — agent_i 自己全程无碰撞
+    safe_mean, safe_std = agent_safe.mean(), agent_safe.std()
+
+    # reach: 仅看是否到达，不考虑 safe
+    is_reached = np.stack(is_reached_list)                              # (n_epi, n_agent)
+    reach_agent_mean = is_reached.mean()
+    reach_epi_mean = np.mean(reach_rates_per_epi)
+
+    # success: 个体 safe AND 个体 reach（per-agent 粒度，与 safe_mean / reach_agent_mean 对齐）
+    success_agent_mat = is_reached & agent_safe                          # (n_epi, n_agent)
+    success_agent_mean = success_agent_mat.mean()
+    # epi-level: 全 agent safe AND 全 agent reach
+    epi_safe_arr = np.array(epi_safe_list, dtype=bool)                  # (n_epi,)
+    success_epi_mean = float(np.mean(epi_safe_arr & is_reached.all(axis=-1)))
 
     print(
         f"reward: {np.mean(rewards):.7f}, min/max reward: {np.min(rewards):.7f}/{np.max(rewards):.7f}, "
         f"cost: {np.mean(costs):.7f}, min/max cost: {np.min(costs):.7f}/{np.max(costs):.7f}, "
         f"last_reward: {np.mean(last_rewards):.7f}, last_dist: {np.mean(last_dists):.7f}, "
         f"safe_rate: {safe_mean * 100:.7f}%, "
+        f"reach_agent: {reach_agent_mean * 100:.7f}%, reach_epi: {reach_epi_mean * 100:.7f}%, "
         f"success_agent: {success_agent_mean * 100:.7f}%, success_epi: {success_epi_mean * 100:.7f}%"
     )
 
@@ -354,7 +380,7 @@ def main():
 
     # required
     # parser.add_argument("--path", type=str, default="logs/LidarSpread/informarl_subgoal/seed0_307133019_OSVB")
-    parser.add_argument("--path", type=str, default="logs/LidarTarget/informarl_subgoal/seed30_501225024_NKUU")
+    parser.add_argument("--path", type=str, default="logs/LidarTarget/informarl_subgoal/seed123_502142404_MJXL")
 
     # manifold (ATACOM) parameters
     parser.add_argument("--topk", type=int, default=3, help="Number of nearest neighbors for manifold")
@@ -379,6 +405,8 @@ def main():
     parser.add_argument("--subgoal-interval", type=int, default=8)
     parser.add_argument("--relative-subgoal", action="store_true", default=True)
     parser.add_argument("--max-delta", type=float, default=None)
+    parser.add_argument("--reach-thresh", type=float, default=None,
+                        help="Override env.params['dist2goal'] for reach/success metrics (default: env value).")
 
     # default
     parser.add_argument("-n", "--num-agents", type=int, default=None)

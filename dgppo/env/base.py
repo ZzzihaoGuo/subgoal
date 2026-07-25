@@ -85,6 +85,13 @@ class MultiAgentEnv(ABC):
         lower_limit, upper_limit = self.action_lim()
         return jnp.clip(action, lower_limit, upper_limit)
 
+    def lighten_graph(self, graph: GraphsTuple) -> GraphsTuple:
+        """Return a storage-light copy of the graph for the rollout buffer (default: identity).
+        Envs that carry heavy env_states (e.g. an MJX Data pytree) override this to strip it, so
+        the scan-stacked history stays small. The scan CARRY keeps the full graph for stepping;
+        only the stored OUTPUT is lightened. Training never reads the stripped fields."""
+        return graph
+
     @abstractproperty
     def state_dim(self) -> int:
         pass

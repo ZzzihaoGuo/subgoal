@@ -19,6 +19,12 @@ from dgppo.trainer.utils import is_connected
 def train(args):
     print(f"> Running train_try_manifold.py {args}")
 
+    # register LidarAnt (MJX ant) at runtime — no edit to dgppo/env/__init__.py
+    from dgppo.env import ENV, LIDAR_ENVS
+    from dgppo.env.lidar_env.lidar_ant import LidarAnt
+    ENV['LidarAnt'] = LidarAnt
+    LIDAR_ENVS.add('LidarAnt')
+
     # 用命令行参数覆盖 utils.py 中的全局系数
     trainer_utils.SUBGOAL_SHADOW_COEF = args.subgoal_shadow_coef
 
@@ -197,7 +203,7 @@ def main():
     parser = argparse.ArgumentParser()
 
     # required arguments
-    parser.add_argument("--env", type=str, default="LidarSpread") #LidarLine; LidarTarget; LidarSpread; LidarBicycleTarget; LinearDrone; CrazyFlie
+    parser.add_argument("--env", type=str, default="LidarLine") #LidarLine; LidarTarget; LidarSpread; LidarBicycleTarget; LinearDrone; CrazyFlie
     parser.add_argument("-n", "--num-agents", type=int, default=3)
     parser.add_argument("--algo", type=str, default="informarl_subgoal")
     parser.add_argument("--obs", type=int, default=3)
@@ -222,7 +228,7 @@ def main():
     # parser.add_argument("--w-slack", type=float, default=0.0)
 
     # custom arguments
-    parser.add_argument("--seed", type=int, default=30)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--steps", type=int, default=400000)
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--debug", action="store_true", default=False)

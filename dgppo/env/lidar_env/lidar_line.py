@@ -16,9 +16,14 @@ class LidarLine(LidarSpread):
     GOAL_ASSIGNMENT = "line"
 
     # Per-env sparse-reward 系数（utils.py 模块默认值复制于此，可按需调整）
-    GOAL_REWARD_COEF = 0.1
-    SUBGOAL_BONUS_COEF = 0.0
-    SUBGOAL_SHADOW_COEF = 0.0
+    # GOAL_REWARD_COEF = 0.00001 # 0.2 
+    # SUBGOAL_BONUS_COEF = 0.000001 # 0.02
+    # SUBGOAL_SHADOW_COEF = 1
+    # DIST_TO_GOAL_COEF = 0.2  # 0.02 0.2 
+    GOAL_REWARD_COEF = 0.2 
+    SUBGOAL_BONUS_COEF = 0.000001 # 0.02
+    SUBGOAL_SHADOW_COEF = 0.1 # 1 0.1
+    DIST_TO_GOAL_COEF = 0.2  # 0.02 0.2 
 
     PARAMS = {
         "car_radius": 0.05,
