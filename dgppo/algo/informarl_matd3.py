@@ -322,6 +322,30 @@ class InforMARL_MATD3(Algorithm):
 
         return action, log_pi, rnn_state
 
+    def collect(self, params: Params, key: PRNGKey, step: int = 0) -> Rollout:
+        """Collect rollouts - Note: actual collection is done in TrainerMATD3
+
+        This method exists to satisfy the Algorithm interface, but MATD3
+        uses off-policy learning where collection is handled by the trainer
+        with a replay buffer. This method should not be called directly.
+
+        Args:
+            params: Network parameters
+            key: Random key
+            step: Training step (unused)
+
+        Returns:
+            Empty rollout (placeholder)
+
+        Raises:
+            NotImplementedError: This method should not be called for MATD3
+        """
+        raise NotImplementedError(
+            "MATD3 uses off-policy learning with replay buffer. "
+            "Data collection is handled by TrainerMATD3.collect_rollouts(). "
+            "Do not call algo.collect() directly."
+        )
+
     def soft_update(self, tau: float) -> None:
         """Soft update target networks: θ_target = τ*θ + (1-τ)*θ_target"""
         self.actor_target_params = jtu.tree_map(
