@@ -221,8 +221,8 @@ def main():
     parser.add_argument("--exploration-noise", type=float, default=0.1, help="Exploration noise during training")
 
     # Replay buffer
-    parser.add_argument("--buffer-size", type=int, default=100000, help="Replay buffer size")
-    parser.add_argument("--min-buffer-size", type=int, default=1000, help="Start training after this many transitions")
+    parser.add_argument("--buffer-size", type=int, default=10000, help="Replay buffer size (episodes)")
+    parser.add_argument("--min-buffer-size", type=int, default=100, help="Start training after this many episodes")
     parser.add_argument("--updates-per-step", type=int, default=1, help="Number of gradient updates per environment step")
 
     # Manifold (ATACOM) parameters
