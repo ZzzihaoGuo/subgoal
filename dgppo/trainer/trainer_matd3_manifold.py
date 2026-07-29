@@ -214,18 +214,24 @@ class TrainerMATD3Manifold:
                 self.algo.save(os.path.join(self.model_dir), step)
 
             # ===== Collect rollouts =====
+            t0 = time()
             rollouts = self.collect_rollouts(step)
+            jax.block_until_ready(rollouts)
+            t_rollout = time() - t0
 
             # ===== Add to replay buffer =====
+            t0 = time()
             self.replay_buffer.append(rollouts)
+            t_buffer_add = time() - t0
 
             # ===== Update algorithm (off-policy) =====
+            t_update_total = 0.0
             if self.replay_buffer.length >= self.min_buffer_size:
+                t0 = time()
                 # Perform multiple gradient updates per environment step
                 for _ in range(self.updates_per_step):
                     # Sample minibatch from replay buffer
                     batch = self.replay_buffer.sample(self.algo.batch_size)
-
                     # Update networks
                     update_info = self.algo.update(batch, step)
 
@@ -233,10 +239,21 @@ class TrainerMATD3Manifold:
                     if _ == self.updates_per_step - 1:
                         wandb.log(update_info, step=self.update_steps)
 
+                # Block once after all updates to measure total time
+                jax.block_until_ready(update_info)
+                t_update_total = time() - t0
+
                 self.update_steps += 1
-            else:
-                # Still collecting initial data
-                tqdm.write(f"Collecting initial data: {self.replay_buffer.length}/{self.min_buffer_size}")
+
+            # Log timing every 10 steps
+            if step % 10 == 0:
+                if self.replay_buffer.length >= self.min_buffer_size:
+                    tqdm.write(f"[TIMING] Rollout: {t_rollout:.3f}s | Buffer add: {t_buffer_add:.3f}s | "
+                              f"Update (×{self.updates_per_step}): {t_update_total:.3f}s | "
+                              f"Total: {t_rollout+t_buffer_add+t_update_total:.3f}s")
+                else:
+                    tqdm.write(f"[INIT] Collecting initial data: {self.replay_buffer.length}/{self.min_buffer_size} | "
+                              f"Rollout: {t_rollout:.3f}s | Buffer add: {t_buffer_add:.3f}s")
 
             pbar.update(1)
 
