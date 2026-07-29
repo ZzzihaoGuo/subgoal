@@ -52,42 +52,40 @@ class FlashbaxReplayBuffer:
         """Initialize buffer with a sample rollout to infer shapes
 
         Args:
-            sample_rollout: A sample rollout to infer data structure
+            sample_rollout: A sample rollout to infer data structure (n_env, T, ...)
         """
-        # Create flashbax trajectory buffer
-        self._buffer = fbx.make_trajectory_buffer(
-            max_length_time_axis=self.max_length // self.add_batch_size,
-            min_length_time_axis=self.sample_batch_size,
+        # Create flashbax flat buffer (stores individual episodes)
+        # Each episode has shape (T, ...)
+        self._buffer = fbx.make_flat_buffer(
+            max_length=self.max_length,
+            min_length=self.min_length,
             sample_batch_size=self.sample_batch_size,
-            add_batch_size=self.add_batch_size,
-            sample_sequence_length=1,  # Sample full episodes
-            period=1,
         )
 
-        # Initialize buffer state with sample data
-        # Remove batch dimension from sample_rollout for initialization
-        sample_single = jax.tree_map(lambda x: x[0:1], sample_rollout)
+        # Initialize buffer state with sample episode (single env's data)
+        # Take first env's trajectory: (T, ...)
+        sample_single = jax.tree_map(lambda x: x[0], sample_rollout)
         self._buffer_state = self._buffer.init(sample_single)
 
     def add(self, rollouts: Rollout):
         """Add rollouts to buffer
 
         Args:
-            rollouts: Rollout with shape (add_batch_size, T, ...)
+            rollouts: Rollout with shape (n_env, T, ...) from parallel envs
         """
         if self._buffer is None:
-            # First call: initialize buffer
+            # First call: initialize buffer with sample data
             self.init(rollouts)
 
-        # Flashbax expects (batch, 1, time, ...) shape
-        # Rollout is (batch, time, ...) so add dummy sequence dimension
-        rollouts_batched = jax.tree_map(
-            lambda x: x[:, jnp.newaxis],  # Add sequence dim
-            rollouts
-        )
+        # Flashbax flat buffer: add each episode one by one
+        # rollouts has shape (n_env, T, ...), each env is one episode
+        n_envs = jax.tree_util.tree_leaves(rollouts)[0].shape[0]
 
-        # Add to buffer
-        self._buffer_state = self._buffer.add(self._buffer_state, rollouts_batched)
+        for i in range(n_envs):
+            # Extract single episode: (T, ...)
+            single_episode = jax.tree_map(lambda x: x[i], rollouts)
+            # Add to buffer
+            self._buffer_state = self._buffer.add(self._buffer_state, single_episode)
 
     def sample(self, key: jax.random.PRNGKey) -> Rollout:
         """Sample a batch from buffer
@@ -108,11 +106,8 @@ class FlashbaxReplayBuffer:
             )
 
         # Sample from buffer
+        # Flashbax flat buffer returns (batch_size, T, ...)
         batch = self._buffer.sample(self._buffer_state, key).experience
-
-        # Remove dummy sequence dimension
-        # Flashbax returns (batch, 1, time, ...), we want (batch, time, ...)
-        batch = jax.tree_map(lambda x: x[:, 0], batch)
 
         return batch
 
