@@ -268,9 +268,11 @@ def main():
     args = parser.parse_args()
 
     # Auto-compute batch_size if not provided
+    # For MATD3: batch_size is number of episodes to sample from replay buffer (not transitions!)
     if args.batch_size is None:
-        args.batch_size = args.n_env_train * (args.max_step // args.subgoal_interval)
-        print(f"Auto batch_size: {args.batch_size}")
+        # Default: 32 episodes for off-policy learning
+        args.batch_size = 32
+        print(f"Auto batch_size: {args.batch_size} episodes (for replay buffer sampling)")
 
     train(args)
 
