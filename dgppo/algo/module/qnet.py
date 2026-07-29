@@ -118,10 +118,12 @@ class QNetwork:
                 name='QNetHead'
             )
         else:
-            # Centralized: larger network for global Q
+            # Centralized: network for global Q
+            # Reduced from (256, 256) to (128, 128) for better efficiency
+            # Still larger than V(s) network (64, 64) due to Q(s,a) input complexity
             self.head = ft.partial(
                 MLP,
-                hid_sizes=(256, 256),
+                hid_sizes=(128, 128),
                 act=nn.relu,
                 act_final=True,
                 name='QNetHead'
