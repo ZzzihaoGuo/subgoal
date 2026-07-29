@@ -108,10 +108,17 @@ class QNetwork:
 
         # Centralized Q-value
         x = flatten(x)  # (n_agents * (gnn_dim + action_dim),)
-        x = MLP(x)      # (1,) - global Q-value
+        x = MLP(64, 64)(x)    # Same size as PPO V-network for fair comparison
+        x = Dense(1)(x)       # (1,) - global Q-value
 
         return q_value
 ```
+
+**Network Size:**
+- Q-network MLP: (64, 64) - **same as PPO V-network**
+- Rationale: Fair comparison, similar parameter count
+- Structure difference: Q takes concat(state, action) while V only takes state
+- Total params: ~80K (comparable to PPO's 80K)
 
 ### Trainer (`trainer_matd3.py`)
 
