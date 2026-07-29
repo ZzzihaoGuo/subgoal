@@ -7,6 +7,7 @@ Much faster than NumPy-based buffer due to no CPU-GPU data transfer.
 import flashbax as fbx
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 from typing import Optional
 
 from .data import Rollout
@@ -64,7 +65,7 @@ class FlashbaxReplayBuffer:
 
         # Initialize buffer state with sample episode (single env's data)
         # Take first env's trajectory: (T, ...)
-        sample_single = jax.tree_map(lambda x: x[0], sample_rollout)
+        sample_single = jtu.tree_map(lambda x: x[0], sample_rollout)
         self._buffer_state = self._buffer.init(sample_single)
 
     def add(self, rollouts: Rollout):
@@ -79,11 +80,11 @@ class FlashbaxReplayBuffer:
 
         # Flashbax flat buffer: add each episode one by one
         # rollouts has shape (n_env, T, ...), each env is one episode
-        n_envs = jax.tree_util.tree_leaves(rollouts)[0].shape[0]
+        n_envs = jtu.tree_leaves(rollouts)[0].shape[0]
 
         for i in range(n_envs):
             # Extract single episode: (T, ...)
-            single_episode = jax.tree_map(lambda x: x[i], rollouts)
+            single_episode = jtu.tree_map(lambda x: x[i], rollouts)
             # Add to buffer
             self._buffer_state = self._buffer.add(self._buffer_state, single_episode)
 
