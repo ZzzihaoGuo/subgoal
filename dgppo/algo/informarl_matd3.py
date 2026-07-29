@@ -457,8 +457,9 @@ class InforMARL_MATD3(Algorithm):
             return target
 
         # Compute targets for all transitions
+        # Note: rollout.dones shape is (b, T) for hierarchical rollout, not (b, T, n_agents)
         bT_targets = jax.vmap(jax.vmap(compute_targets))(
-            rollout.next_graph, rollout.sparse_rewards, rollout.dones[:, :, 0]
+            rollout.next_graph, rollout.sparse_rewards, rollout.dones
         )  # (b, T)
 
         def critic_loss_fn(Q_params, Q_net):
