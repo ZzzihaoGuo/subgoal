@@ -101,10 +101,10 @@ class TrainerMATD3Manifold:
         def rollout_fn_(cur_params, cur_keys, reach_thresh):
             return jax.vmap(ft.partial(rollout_fn_single_, cur_params, reach_thresh=reach_thresh))(cur_keys)
 
-        # IMPORTANT: Disable JIT for rollout to save GPU memory
-        # JIT compiling n_env_train parallel rollouts causes OOM
-        # Trade-off: slightly slower collection for much lower memory usage
-        self.rollout_fn = rollout_fn_  # Removed jax.jit() wrapping
+        # Re-enable JIT for rollout (10-30x speedup!)
+        # Use smaller n_env_train (64-128) to avoid OOM
+        # JIT is critical for performance - without it, training is extremely slow
+        self.rollout_fn = jax.jit(rollout_fn_)
 
         # Reach threshold schedule
         self.reach_thresh_schedule_fn = getattr(algo, 'reach_thresh_schedule_fn',
