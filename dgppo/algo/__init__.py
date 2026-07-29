@@ -4,6 +4,7 @@ from .informarl_subgoal import InforMARL_SUB
 from .informarl_lagr import InforMARLLagr
 from .dgppo import DGPPO
 from .hcbfcrpo import HCBFCRPO
+from .informarl_matd3 import InforMARL_MATD3
 
 
 def make_algo(algo: str, **kwargs) -> Algorithm:
@@ -17,5 +18,7 @@ def make_algo(algo: str, **kwargs) -> Algorithm:
         return DGPPO(**kwargs)
     elif algo == 'hcbfcrpo':
         return HCBFCRPO(**kwargs)
+    elif algo == 'informarl_matd3':
+        return InforMARL_MATD3(**kwargs)
     else:
         raise ValueError(f'Unknown algorithm: {algo}')
