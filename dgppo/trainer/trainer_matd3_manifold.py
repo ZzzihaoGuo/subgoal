@@ -10,7 +10,7 @@ from time import time
 from tqdm import tqdm
 
 from .data import Rollout
-from .buffer_flashbax import FlashbaxReplayBuffer
+from .buffer import ReplayBuffer
 from .utils import test_rollout_subgoal_manifold
 from ..env import MultiAgentEnv
 from ..algo.informarl_matd3 import InforMARL_MATD3
@@ -78,13 +78,8 @@ class TrainerMATD3Manifold:
         self.min_buffer_size = min_buffer_size
         self.updates_per_step = updates_per_step
 
-        # Initialize Flashbax replay buffer (JAX-native, GPU-only)
-        self.replay_buffer = FlashbaxReplayBuffer(
-            max_length=buffer_size,
-            min_length=min_buffer_size,
-            sample_batch_size=algo.batch_size,
-            add_batch_size=n_env_train,  # Number of envs per rollout
-        )
+        # Initialize replay buffer
+        self.replay_buffer = ReplayBuffer(size=buffer_size)
 
         self.update_steps = 0
         self.key = jax.random.PRNGKey(seed)
@@ -224,20 +219,19 @@ class TrainerMATD3Manifold:
             jax.block_until_ready(rollouts)
             t_rollout = time() - t0
 
-            # ===== Add to replay buffer (Flashbax - GPU-native) =====
+            # ===== Add to replay buffer =====
             t0 = time()
-            self.replay_buffer.add(rollouts)
+            self.replay_buffer.append(rollouts)
             t_buffer_add = time() - t0
 
             # ===== Update algorithm (off-policy) =====
             t_update_total = 0.0
-            if self.replay_buffer.can_sample():
+            if self.replay_buffer.length >= self.min_buffer_size:
                 t0 = time()
                 # Perform multiple gradient updates per environment step
                 for _ in range(self.updates_per_step):
-                    # Sample minibatch from replay buffer (requires PRNG key)
-                    sample_key, self.key = jr.split(self.key)
-                    batch = self.replay_buffer.sample(sample_key)
+                    # Sample minibatch from replay buffer
+                    batch = self.replay_buffer.sample(self.algo.batch_size)
                     # Update networks
                     update_info = self.algo.update(batch, step)
 
@@ -253,7 +247,7 @@ class TrainerMATD3Manifold:
 
             # Log timing every 10 steps
             if step % 10 == 0:
-                if self.replay_buffer.can_sample():
+                if self.replay_buffer.length >= self.min_buffer_size:
                     tqdm.write(f"[TIMING] Rollout: {t_rollout:.3f}s | Buffer add: {t_buffer_add:.3f}s | "
                               f"Update (×{self.updates_per_step}): {t_update_total:.3f}s | "
                               f"Total: {t_rollout+t_buffer_add+t_update_total:.3f}s")

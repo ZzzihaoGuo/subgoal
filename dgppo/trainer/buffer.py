@@ -46,21 +46,25 @@ class ReplayBuffer(Buffer):
 
         Uses a circular buffer to avoid copying data on every append.
         This is O(1) instead of O(buffer_size).
+
+        CRITICAL OPTIMIZATION: Keep JAX arrays in buffer (no JAX→NumPy conversion)
+        This avoids blocking on GPU→CPU transfer. Conversion only happens during
+        sample() which is much less frequent.
         """
-        rollout_np = jax2np(rollout)
-        n_new_episodes = rollout_np.graph.nodes.shape[0]  # First dimension is batch
+        # KEEP AS JAX ARRAYS - no conversion!
+        n_new_episodes = rollout.graph.nodes.shape[0]  # First dimension is batch
 
         if self._buffer is None:
             # First time: allocate buffer with max_size
             # Pre-allocate space for 'size' episodes
-            self._buffer = rollout_np
+            self._buffer = rollout
             self._current_size = min(n_new_episodes, self._size)
             self._pointer = self._current_size % self._size
         else:
             # Add new rollouts using circular indexing
             for i in range(n_new_episodes):
                 # Get single episode
-                single_episode = jtu.tree_map(lambda x: x[i:i+1], rollout_np)
+                single_episode = jtu.tree_map(lambda x: x[i:i+1], rollout)
 
                 if self._current_size < self._size:
                     # Buffer not full yet: concatenate
@@ -91,7 +95,8 @@ class ReplayBuffer(Buffer):
 
         # Sample from valid range [0, current_size)
         idx = np.random.randint(0, self._current_size, batch_size)
-        return np2jax(self.get_data(idx))
+        # Buffer already contains JAX arrays, no conversion needed!
+        return self.get_data(idx)
 
     def get_data(self, idx: np.ndarray) -> Rollout:
         return jtu.tree_map(lambda x: x[idx], self._buffer)
